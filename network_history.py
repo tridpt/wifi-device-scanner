@@ -513,6 +513,166 @@ class NetworkHistory:
             devices.append(device)
         return devices
 
+    def get_device_history(self, device_or_fingerprint: Any, limit: int = 100) -> Dict[str, Any]:
+        """Return annotations, last-seen data, and IP/MAC history for one device.
+
+        When a device changes IP or randomized MAC, the change event links the
+        old and new fingerprints so the detail page can show one continuous
+        timeline instead of two unrelated devices.
+        """
+        if isinstance(device_or_fingerprint, str):
+            fingerprint = _clean(device_or_fingerprint)
+            if not fingerprint.startswith(("mac:", "ip:", "ipv6:", "name:", "unknown:")):
+                normalized = _normalise_mac(fingerprint)
+                fingerprint = f"mac:{normalized}" if normalized else fingerprint
+        else:
+            fingerprint = device_fingerprint(device_or_fingerprint or {})
+        limit = max(1, min(int(limit), 500))
+
+        def payload_fingerprint(payload: Any) -> str:
+            if not isinstance(payload, dict):
+                return ""
+            explicit = _clean(payload.get("fingerprint"))
+            if explicit:
+                return explicit
+            derived = device_fingerprint(payload)
+            return "" if derived == "unknown:device" else derived
+
+        default_metadata = {
+            "fingerprint": fingerprint,
+            "alias": "",
+            "notes": "",
+            "room": "",
+            "trusted": False,
+        }
+        with self._lock, self._connection() as conn:
+            metadata_by_fp = self._metadata_map(conn)
+            event_rows = conn.execute(
+                "SELECT id, scan_id, fingerprint, event_type, details_json, created_at "
+                "FROM events ORDER BY id"
+            ).fetchall()
+
+            # Follow MAC/IP change links to collect all known identities.
+            known_fingerprints = {fingerprint} if fingerprint else set()
+            event_records = []
+            for row in event_rows:
+                try:
+                    details = json.loads(row["details_json"] or "{}")
+                except (TypeError, ValueError):
+                    details = {}
+                candidates = set()
+                row_fingerprint = _clean(row["fingerprint"])
+                if row_fingerprint and row_fingerprint != "unknown:device":
+                    candidates.add(row_fingerprint)
+                if isinstance(details, dict):
+                    for key in ("device", "previous"):
+                        candidate = payload_fingerprint(details.get(key))
+                        if candidate:
+                            candidates.add(candidate)
+                event_records.append((row, details, candidates))
+
+            expanded = True
+            while expanded:
+                expanded = False
+                for _row, _details, candidates in event_records:
+                    if known_fingerprints.intersection(candidates):
+                        before = len(known_fingerprints)
+                        known_fingerprints.update(candidates)
+                        expanded = expanded or len(known_fingerprints) != before
+
+            observations: List[Dict[str, Any]] = []
+            if known_fingerprints:
+                placeholders = ", ".join("?" for _ in known_fingerprints)
+                rows = conn.execute(
+                    f"""
+                    SELECT s.*, r.started_at AS scan_started_at, r.completed_at AS observed_at
+                    FROM snapshots s
+                    JOIN scans r ON r.id = s.scan_id
+                    WHERE s.fingerprint IN ({placeholders})
+                    ORDER BY r.id DESC, s.id DESC
+                    """,
+                    tuple(sorted(known_fingerprints)),
+                ).fetchall()
+                for row in rows:
+                    device = self._apply_metadata_from_map(self._row_device(row), metadata_by_fp)
+                    observation = dict(device)
+                    observation.update(
+                        {
+                            "scan_id": row["scan_id"],
+                            "observed_at": row["observed_at"],
+                            "scan_started_at": row["scan_started_at"],
+                            "fingerprint": row["fingerprint"],
+                        }
+                    )
+                    observations.append(observation)
+
+            metadata = metadata_by_fp.get(fingerprint)
+            if metadata is None:
+                for related in known_fingerprints:
+                    if related in metadata_by_fp:
+                        metadata = metadata_by_fp[related]
+                        break
+            metadata = dict(metadata or default_metadata)
+
+            related_events = []
+            for row, details, candidates in event_records:
+                if known_fingerprints.intersection(candidates):
+                    related_events.append(
+                        {
+                            "id": row["id"],
+                            "scan_id": row["scan_id"],
+                            "fingerprint": row["fingerprint"],
+                            "event_type": row["event_type"],
+                            "created_at": row["created_at"],
+                            "details": details,
+                        }
+                    )
+            related_events.reverse()
+
+        chronological = list(reversed(observations))
+
+        def value_history(key: str, normalize_mac: bool = False) -> List[Dict[str, Any]]:
+            grouped: Dict[str, Dict[str, Any]] = {}
+            for observation in chronological:
+                value = _normalise_mac(observation.get(key)) if normalize_mac else _clean(observation.get(key))
+                if not value or value.lower() in PLACEHOLDER_VALUES:
+                    continue
+                observed_at = _clean(observation.get("observed_at"))
+                entry = grouped.setdefault(
+                    value,
+                    {
+                        "value": value,
+                        "first_seen": observed_at,
+                        "last_seen": observed_at,
+                        "observations": 0,
+                    },
+                )
+                if observed_at and (not entry["first_seen"] or observed_at < entry["first_seen"]):
+                    entry["first_seen"] = observed_at
+                if observed_at and (not entry["last_seen"] or observed_at > entry["last_seen"]):
+                    entry["last_seen"] = observed_at
+                entry["observations"] += 1
+            return sorted(grouped.values(), key=lambda item: item.get("last_seen") or "", reverse=True)
+
+        return {
+            "fingerprint": fingerprint,
+            "fingerprints": sorted(known_fingerprints),
+            "metadata": metadata,
+            "alias": metadata.get("alias", ""),
+            "notes": metadata.get("notes", ""),
+            "room": metadata.get("room", ""),
+            "trusted": bool(metadata.get("trusted", False)),
+            "first_seen": chronological[0].get("observed_at") if chronological else None,
+            "last_seen": observations[0].get("observed_at") if observations else None,
+            "observation_count": len(observations),
+            "current": observations[0] if observations else None,
+            "observations": observations[:limit],
+            "ip_history": value_history("ip"),
+            "ipv6_history": value_history("ipv6"),
+            "mac_history": value_history("mac", normalize_mac=True),
+            "events": related_events[:limit],
+        }
+
     def list_scans(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         with self._lock, self._connection() as conn:

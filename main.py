@@ -78,6 +78,19 @@ CATEGORY_ICONS = {
 }
 
 
+def _format_history_time(value) -> str:
+    """Format an ISO timestamp from SQLite for the local UI."""
+    if not value:
+        return "Chưa có"
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return parsed.strftime("%d/%m/%Y %H:%M:%S")
+    except (TypeError, ValueError):
+        return str(value)
+
+
 class BlockMacGuideWindow(ctk.CTkToplevel):
     """Cửa sổ Popup hướng dẫn chặn thiết bị lạ qua Bộ lọc MAC (MAC Filter) của Modem."""
 
@@ -1241,6 +1254,300 @@ class DeviceMetadataWindow(ctk.CTkToplevel):
             self.destroy()
 
 
+class DeviceProfileWindow(ctk.CTkToplevel):
+    """Show one device's annotations, current identity, and observation history."""
+
+    EVENT_LABELS = {
+        "new": "Thiết bị mới",
+        "removed": "Thiết bị biến mất",
+        "ip_changed": "Đổi địa chỉ IP",
+        "mac_changed": "Đổi địa chỉ MAC",
+        "changed": "Thông tin thay đổi",
+    }
+
+    def __init__(self, master, device: dict, history: NetworkHistory, on_saved=None):
+        super().__init__(master)
+        self.device = device
+        self.history = history
+        self.on_saved = on_saved
+        self.detail = {}
+
+        current_name = device.get("alias") or device.get("name") or device.get("ip") or "Thiết bị"
+        self.title(f"📋 Chi tiết thiết bị - {current_name}")
+        self.geometry("820x720")
+        self.minsize(680, 580)
+        self.transient(master)
+        self.after(50, self.lift)
+
+        self._build_ui()
+        self._load_history()
+
+    def _build_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+
+        header = ctk.CTkFrame(self, fg_color=("#E0F2FE", "#0C4A6E"), corner_radius=10)
+        header.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(header, text="📋", font=ctk.CTkFont(size=34), width=48).grid(
+            row=0, column=0, rowspan=2, padx=(14, 8), pady=12
+        )
+        self.lbl_header_title = ctk.CTkLabel(
+            header, text="Thiết bị", font=ctk.CTkFont(size=17, weight="bold"), anchor="w"
+        )
+        self.lbl_header_title.grid(row=0, column=1, padx=4, pady=(12, 2), sticky="w")
+        self.lbl_header_sub = ctk.CTkLabel(
+            header,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=("#075985", "#BAE6FD"),
+            anchor="w",
+        )
+        self.lbl_header_sub.grid(row=1, column=1, padx=4, pady=(0, 12), sticky="w")
+        self.lbl_header_badge = ctk.CTkLabel(
+            header,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=("#FFFFFF", "#082F49"),
+            corner_radius=6,
+            padx=10,
+            pady=5,
+        )
+        self.lbl_header_badge.grid(row=0, column=2, rowspan=2, padx=14, pady=12, sticky="e")
+
+        editor = ctk.CTkFrame(self, fg_color=("#F8FAFC", "#1E293B"), corner_radius=8)
+        editor.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        editor.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(editor, text="Tên hiển thị", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w"
+        )
+        self.entry_alias = ctk.CTkEntry(editor, placeholder_text="Ví dụ: TV phòng khách")
+        self.entry_alias.insert(0, self.device.get("alias", ""))
+        self.entry_alias.grid(row=0, column=1, padx=8, pady=(12, 6), sticky="ew")
+        ctk.CTkLabel(editor, text="Phòng / khu vực", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=1, column=0, padx=(14, 8), pady=6, sticky="w"
+        )
+        self.entry_room = ctk.CTkEntry(editor, placeholder_text="Phòng khách, văn phòng...")
+        self.entry_room.insert(0, self.device.get("room", ""))
+        self.entry_room.grid(row=1, column=1, padx=8, pady=6, sticky="ew")
+        ctk.CTkLabel(editor, text="Ghi chú", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=2, column=0, padx=(14, 8), pady=6, sticky="nw"
+        )
+        self.entry_notes = ctk.CTkTextbox(editor, height=60)
+        self.entry_notes.insert("1.0", self.device.get("notes", ""))
+        self.entry_notes.grid(row=2, column=1, padx=8, pady=6, sticky="ew")
+        self.trusted_var = tk.BooleanVar(value=bool(self.device.get("trusted")))
+        ctk.CTkCheckBox(editor, text="Đánh dấu thiết bị tin cậy", variable=self.trusted_var).grid(
+            row=3, column=1, padx=8, pady=(2, 8), sticky="w"
+        )
+        action_row = ctk.CTkFrame(editor, fg_color="transparent")
+        action_row.grid(row=0, column=2, rowspan=4, padx=(8, 14), pady=10, sticky="e")
+        ctk.CTkButton(
+            action_row,
+            text="Lưu thay đổi",
+            width=120,
+            fg_color="#0F766E",
+            hover_color="#115E59",
+            command=self._save_metadata,
+        ).pack(pady=(0, 6))
+        ctk.CTkButton(
+            action_row,
+            text="Làm mới lịch sử",
+            width=120,
+            fg_color=("#E5E7EB", "#334155"),
+            text_color=("#111827", "#F8FAFC"),
+            hover_color=("#D1D5DB", "#475569"),
+            command=self._load_history,
+        ).pack()
+        self.lbl_save_status = ctk.CTkLabel(
+            editor, text="", font=ctk.CTkFont(size=10), text_color=("#0F766E", "#5EEAD4"), anchor="w"
+        )
+        self.lbl_save_status.grid(row=4, column=0, columnspan=3, padx=14, pady=(0, 8), sticky="w")
+
+        self.content = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.content.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="nsew")
+        self.content.grid_columnconfigure(0, weight=1)
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.grid(row=3, column=0, padx=16, pady=(0, 12), sticky="ew")
+        ctk.CTkButton(footer, text="Đóng", width=90, command=self.destroy).pack(side="right")
+
+    def _load_history(self):
+        try:
+            self.detail = self.history.get_device_history(self.device)
+            self._render_header()
+            self._render_content()
+        except Exception as exc:
+            self.lbl_save_status.configure(text=f"Không đọc được lịch sử: {exc}", text_color="#EF4444")
+
+    def _render_header(self):
+        current = self.detail.get("current") or self.device
+        name = self.detail.get("alias") or current.get("name") or current.get("ip") or "Thiết bị"
+        ip = current.get("ip") or current.get("ipv6") or "Chưa rõ IP"
+        mac = current.get("mac") or "Chưa rõ MAC"
+        vendor = current.get("vendor") or "Chưa rõ hãng"
+        self.lbl_header_title.configure(text=name)
+        self.lbl_header_sub.configure(text=f"IP: {ip}  •  MAC: {mac}  •  Hãng: {vendor}")
+        if self.device.get("historical"):
+            state = "🕘 Snapshot gần nhất"
+        else:
+            state = "🟢 Đang online"
+        if self.detail.get("trusted"):
+            state += "  •  ✅ Tin cậy"
+        self.lbl_header_badge.configure(text=state)
+        self.title(f"📋 Chi tiết thiết bị - {name}")
+
+    @staticmethod
+    def _clear(parent):
+        for widget in parent.winfo_children():
+            widget.destroy()
+
+    @staticmethod
+    def _add_metric(parent, column: int, title: str, value: str, color: str):
+        card = ctk.CTkFrame(parent, fg_color=("#FFFFFF", "#1E293B"), corner_radius=8)
+        card.grid(row=0, column=column, padx=4, sticky="ew")
+        ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=10), text_color=("#64748B", "#94A3B8")).pack(
+            padx=10, pady=(9, 2)
+        )
+        ctk.CTkLabel(card, text=value, font=ctk.CTkFont(size=12, weight="bold"), text_color=color).pack(
+            padx=10, pady=(0, 9)
+        )
+
+    def _render_content(self):
+        self._clear(self.content)
+        self.content.grid_columnconfigure(0, weight=1)
+        summary = ctk.CTkFrame(self.content, fg_color="transparent")
+        summary.pack(fill="x", padx=4, pady=(4, 8))
+        for column in range(4):
+            summary.grid_columnconfigure(column, weight=1)
+        self._add_metric(summary, 0, "Lần thấy cuối", _format_history_time(self.detail.get("last_seen")), "#0284C7")
+        self._add_metric(summary, 1, "Lần đầu thấy", _format_history_time(self.detail.get("first_seen")), "#0F766E")
+        self._add_metric(summary, 2, "Số snapshot", str(self.detail.get("observation_count", 0)), "#7C3AED")
+        self._add_metric(summary, 3, "Số danh tính", str(len(self.detail.get("fingerprints") or [])), "#D97706")
+
+        current = self.detail.get("current") or self.device
+        identity_box = ctk.CTkFrame(self.content, fg_color=("#F8FAFC", "#1E293B"), corner_radius=8)
+        identity_box.pack(fill="x", padx=4, pady=4)
+        ctk.CTkLabel(identity_box, text="Danh tính hiện tại", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(
+            fill="x", padx=12, pady=(10, 6)
+        )
+        details = [
+            ("IPv4", current.get("ip") or "—"),
+            ("IPv6", current.get("ipv6") or "—"),
+            ("MAC", current.get("mac") or "—"),
+            ("Hostname", current.get("name") or "—"),
+            ("Hãng", current.get("vendor") or "—"),
+            ("Loại", current.get("category") or "—"),
+            ("Nguồn tên", current.get("hostname_source") or current.get("discovery") or "—"),
+            ("Fingerprint", self.detail.get("fingerprint") or "—"),
+        ]
+        grid = ctk.CTkFrame(identity_box, fg_color="transparent")
+        grid.pack(fill="x", padx=12, pady=(0, 10))
+        grid.grid_columnconfigure(1, weight=1)
+        grid.grid_columnconfigure(3, weight=1)
+        for index, (label, value) in enumerate(details):
+            row, column = divmod(index, 2)
+            base = column * 2
+            ctk.CTkLabel(grid, text=label, font=ctk.CTkFont(size=10, weight="bold"), anchor="w").grid(
+                row=row, column=base, padx=(0, 8), pady=3, sticky="w"
+            )
+            ctk.CTkLabel(grid, text=str(value), font=ctk.CTkFont(size=10), anchor="w").grid(
+                row=row, column=base + 1, padx=(0, 18), pady=3, sticky="ew"
+            )
+
+        self._add_value_history(self.content, "Lịch sử IPv4", self.detail.get("ip_history") or [])
+        self._add_value_history(self.content, "Lịch sử IPv6", self.detail.get("ipv6_history") or [])
+        self._add_value_history(self.content, "Lịch sử MAC", self.detail.get("mac_history") or [])
+
+        timeline_box = ctk.CTkFrame(self.content, fg_color=("#F8FAFC", "#1E293B"), corner_radius=8)
+        timeline_box.pack(fill="x", padx=4, pady=4)
+        ctk.CTkLabel(timeline_box, text="Timeline quan sát", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(
+            fill="x", padx=12, pady=(10, 6)
+        )
+        observations = self.detail.get("observations") or []
+        if not observations:
+            ctk.CTkLabel(timeline_box, text="Chưa có snapshot lịch sử cho thiết bị này.", anchor="w").pack(
+                fill="x", padx=12, pady=(0, 10)
+            )
+        for observation in observations:
+            row = ctk.CTkFrame(timeline_box, fg_color=("#FFFFFF", "#0F172A"), corner_radius=6)
+            row.pack(fill="x", padx=10, pady=3)
+            observed = _format_history_time(observation.get("observed_at"))
+            ip = observation.get("ip") or observation.get("ipv6") or "—"
+            mac = observation.get("mac") or "—"
+            ctk.CTkLabel(row, text=observed, width=145, font=ctk.CTkFont(size=10, weight="bold"), anchor="w").pack(
+                side="left", padx=10, pady=8
+            )
+            ctk.CTkLabel(row, text=f"IP {ip}  •  MAC {mac}", font=ctk.CTkFont(size=10), anchor="w").pack(
+                side="left", padx=6, pady=8, fill="x", expand=True
+            )
+
+        events = self.detail.get("events") or []
+        if events:
+            events_box = ctk.CTkFrame(self.content, fg_color=("#FFF7ED", "#451A03"), corner_radius=8)
+            events_box.pack(fill="x", padx=4, pady=4)
+            ctk.CTkLabel(events_box, text="Thay đổi đã ghi nhận", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(
+                fill="x", padx=12, pady=(10, 6)
+            )
+            for event in events:
+                details = event.get("details") or {}
+                current_event = details.get("device") or {}
+                previous_event = details.get("previous") or {}
+                event_type = self.EVENT_LABELS.get(event.get("event_type"), event.get("event_type", "Thay đổi"))
+                change_text = ""
+                if event.get("event_type") == "ip_changed":
+                    change_text = f" • {previous_event.get('ip') or '—'} → {current_event.get('ip') or '—'}"
+                elif event.get("event_type") == "mac_changed":
+                    change_text = f" • {previous_event.get('mac') or '—'} → {current_event.get('mac') or '—'}"
+                text = f"{_format_history_time(event.get('created_at'))}  •  {event_type}{change_text}"
+                ctk.CTkLabel(events_box, text=text, anchor="w", wraplength=740).pack(fill="x", padx=12, pady=3)
+            ctk.CTkFrame(events_box, height=6, fg_color="transparent").pack()
+
+    def _add_value_history(self, parent, title: str, items: list):
+        box = ctk.CTkFrame(parent, fg_color=("#F8FAFC", "#1E293B"), corner_radius=8)
+        box.pack(fill="x", padx=4, pady=4)
+        ctk.CTkLabel(box, text=title, font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(
+            fill="x", padx=12, pady=(10, 6)
+        )
+        if not items:
+            ctk.CTkLabel(box, text="Chưa có dữ liệu.", anchor="w", text_color=("#64748B", "#94A3B8")).pack(
+                fill="x", padx=12, pady=(0, 10)
+            )
+            return
+        for item in items:
+            value = item.get("value") or "—"
+            count = item.get("observations", 0)
+            first = _format_history_time(item.get("first_seen"))
+            last = _format_history_time(item.get("last_seen"))
+            row = ctk.CTkFrame(box, fg_color=("#FFFFFF", "#0F172A"), corner_radius=6)
+            row.pack(fill="x", padx=10, pady=3)
+            ctk.CTkLabel(row, text=str(value), font=ctk.CTkFont(family="Consolas", size=11, weight="bold"), anchor="w").pack(
+                side="left", padx=10, pady=7
+            )
+            ctk.CTkLabel(row, text=f"{count} lần  •  {first} → {last}", font=ctk.CTkFont(size=10), anchor="e").pack(
+                side="right", padx=10, pady=7
+            )
+        ctk.CTkFrame(box, height=6, fg_color="transparent").pack()
+
+    def _save_metadata(self):
+        values = {
+            "alias": self.entry_alias.get().strip(),
+            "room": self.entry_room.get().strip(),
+            "notes": self.entry_notes.get("1.0", "end").strip(),
+            "trusted": bool(self.trusted_var.get()),
+        }
+        try:
+            if self.on_saved:
+                self.on_saved(self.device, values)
+            else:
+                self.history.set_device_metadata(self.device, **values)
+            self.device.update(values)
+            self.lbl_save_status.configure(text="✅ Đã lưu thông tin thiết bị.", text_color=("#0F766E", "#5EEAD4"))
+            self._load_history()
+        except Exception as exc:
+            self.lbl_save_status.configure(text=f"Không thể lưu: {exc}", text_color="#EF4444")
+
+
 class DeviceRow(ctk.CTkFrame):
     """Một dòng hiển thị thông tin 1 thiết bị trong danh sách."""
 
@@ -1475,14 +1782,14 @@ class DeviceRow(ctk.CTkFrame):
 
         btn_meta = ctk.CTkButton(
             btn_frame,
-            text="✎ Ghi chú",
-            width=70,
+            text="📋 Chi tiết",
+            width=78,
             height=26,
             font=ctk.CTkFont(size=11),
             fg_color=("#E5E7EB", "#374151"),
             text_color=("#111827", "#F9FAFB"),
             hover_color=("#D1D5DB", "#4B5563"),
-            command=self._edit_metadata,
+            command=self._open_profile,
         )
         btn_meta.pack(side="left", padx=2)
 
@@ -1541,6 +1848,14 @@ class DeviceRow(ctk.CTkFrame):
     def _open_port_scanner(self):
         """Mở cửa sổ soi cổng dịch vụ của thiết bị này."""
         DeviceDetailWindow(self.winfo_toplevel(), self.device)
+
+    def _open_profile(self):
+        """Mở hồ sơ thiết bị và timeline IP/MAC."""
+        app = self.winfo_toplevel()
+        if hasattr(app, "_open_device_profile"):
+            app._open_device_profile(self.device)
+        else:
+            self._edit_metadata()
 
     def _edit_metadata(self):
         app = self.winfo_toplevel()
@@ -2633,6 +2948,13 @@ class WifiScannerApp(ctk.CTk):
             return
         DeviceMetadataWindow(self, device, self._on_device_metadata_saved)
 
+    def _open_device_profile(self, device: dict):
+        """Open the full device profile with annotations and history."""
+        if self.history is None:
+            messagebox.showwarning("Lịch sử không khả dụng", "Không thể mở cơ sở dữ liệu lịch sử trong profile hiện tại.")
+            return
+        DeviceProfileWindow(self, device, self.history, self._on_device_metadata_saved)
+
     def _on_device_metadata_saved(self, device: dict, values: dict):
         if self.history is None:
             return
@@ -2680,7 +3002,18 @@ class WifiScannerApp(ctk.CTk):
                 details = event.get("details") or {}
                 device = details.get("device") or {}
                 text = f"{event.get('created_at', '')}  •  {event.get('event_type', '')}  •  {device.get('alias') or device.get('name') or device.get('ip') or event.get('fingerprint')}"
-                ctk.CTkLabel(scroll, text=text, anchor="w", wraplength=730).pack(fill="x", padx=12, pady=2)
+                event_row = ctk.CTkFrame(scroll, fg_color="transparent")
+                event_row.pack(fill="x", padx=8, pady=2)
+                ctk.CTkLabel(event_row, text=text, anchor="w", wraplength=640).pack(side="left", padx=4, pady=2, fill="x", expand=True)
+                if device:
+                    ctk.CTkButton(
+                        event_row,
+                        text="Xem chi tiết",
+                        width=92,
+                        height=24,
+                        font=ctk.CTkFont(size=10),
+                        command=lambda d=device: self._open_device_profile(d),
+                    ).pack(side="right", padx=4, pady=2)
         ctk.CTkButton(dialog, text="Đóng", width=90, command=dialog.destroy).grid(row=2, column=0, padx=14, pady=12, sticky="e")
 
     def _start_scan(self):

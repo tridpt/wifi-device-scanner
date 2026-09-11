@@ -89,6 +89,31 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(device["alias"], "Phone")
             self.assertTrue(device["trusted"])
 
+    def test_device_history_follows_ip_and_mac_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            history = NetworkHistory(os.path.join(folder, "history.db"))
+            history.record_scan([{"ip": "192.168.1.2", "mac": "AA:BB:CC:DD:EE:01", "name": "phone"}])
+            history.record_scan([{"ip": "192.168.1.3", "mac": "AA:BB:CC:DD:EE:01", "name": "phone"}])
+            history.record_scan([{"ip": "192.168.1.3", "mac": "AA:BB:CC:DD:EE:02", "name": "phone"}])
+            history.set_device_metadata(
+                {"ip": "192.168.1.3", "mac": "AA:BB:CC:DD:EE:02"},
+                alias="Phone",
+                room="Living",
+                trusted=True,
+            )
+
+            detail = history.get_device_history({"ip": "192.168.1.3", "mac": "AA:BB:CC:DD:EE:02"})
+            self.assertEqual(detail["alias"], "Phone")
+            self.assertEqual(detail["room"], "Living")
+            self.assertTrue(detail["trusted"])
+            self.assertEqual(detail["observation_count"], 3)
+            self.assertEqual({item["value"] for item in detail["ip_history"]}, {"192.168.1.2", "192.168.1.3"})
+            self.assertEqual(
+                {item["value"] for item in detail["mac_history"]},
+                {"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"},
+            )
+            self.assertEqual(detail["events"][0]["event_type"], "mac_changed")
+
 
 class SecurityTests(unittest.TestCase):
     def test_smb_guest_uses_one_connection_for_negotiate_and_session(self) -> None:

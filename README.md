@@ -59,6 +59,7 @@
    - Lưu snapshot theo từng lần quét tại `%LOCALAPPDATA%\\WifiDeviceScanner\\history.db`.
    - Phát hiện thiết bị mới, biến mất, đổi IP hoặc đổi MAC; thông báo Windows khi có thay đổi.
    - Cho phép đặt tên, phòng, ghi chú và đánh dấu thiết bị tin cậy. Annotation được giữ lại khi thiết bị đổi IP/MAC nếu có thể ghép nối.
+   - Nút **Chi tiết** mở hồ sơ từng thiết bị, hiển thị lần thấy cuối, timeline quan sát và lịch sử IP/MAC.
 13. **Discovery đa nguồn & độ tin cậy**:
    - Hỗ trợ IPv6 neighbor cache, mDNS, SSDP/UPnP, reverse-DNS/NetBIOS hostname và DHCP lease hostname khi máy đang quản trị DHCP server; router gia đình thường không công khai lease cho client nên trạng thái này được ghi là best-effort.
    - Chọn nhiều adapter, retry/rate-limit và giới hạn an toàn cho CIDR lớn; hiển thị cảnh báo AP/client isolation hoặc VLAN thay vì khẳng định tuyệt đối.
