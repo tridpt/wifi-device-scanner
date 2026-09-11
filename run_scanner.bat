@@ -1,23 +1,34 @@
 @echo off
 title Wi-Fi Device Scanner
-cd /d "%~dp0"
+setlocal
+set "APP_DIR=%~dp0"
+cd /d "%APP_DIR%"
 
 echo ========================================================
 echo        STARTING WI-FI DEVICE SCANNER...
 echo ========================================================
 
-:: Check Python virtual environment in parent folder d:\App\.venv
-if exist "..\.venv\Scripts\python.exe" (
+:: Prefer a virtual environment inside the cloned repository.
+if exist "%APP_DIR%.venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%APP_DIR%.venv\Scripts\python.exe"
+)
+
+:: Keep compatibility with the original workspace layout.
+if not defined PYTHON_EXE if exist "%APP_DIR%..\.venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%APP_DIR%..\.venv\Scripts\python.exe"
+)
+
+if defined PYTHON_EXE (
     echo [OK] Using Python virtual environment...
-    "..\.venv\Scripts\python.exe" main.py
+    "%PYTHON_EXE%" "%APP_DIR%main.py"
     goto end
 )
 
 :: Check system Python
-python --version >nul 2>&1
-if %errorlevel% equ 0 (
+where python.exe >nul 2>&1
+if not errorlevel 1 (
     echo [OK] Using system Python...
-    python main.py
+    python "%APP_DIR%main.py"
     goto end
 )
 
@@ -25,3 +36,4 @@ echo [ERROR] Python not found.
 pause
 
 :end
+endlocal

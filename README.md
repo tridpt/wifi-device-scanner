@@ -59,17 +59,24 @@
 
 ## 🚀 Hướng dẫn khởi chạy
 
+### Cài đặt lần đầu
+Mở PowerShell tại thư mục dự án và chạy:
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
 ### Cách 1: Khởi chạy 1-Click
 Nhấp đúp chuột vào tệp:
 ```
-d:\App\WifiDeviceScanner\run_scanner.bat
+run_scanner.bat
 ```
 hoặc chạy ngầm êm ái bằng `Chay_Scanner.vbs`.
 
 ### Cách 2: Khởi chạy bằng lệnh dòng lệnh
 Mở Terminal / PowerShell và chạy:
 ```powershell
-d:\App\.venv\Scripts\python.exe d:\App\WifiDeviceScanner\main.py
+.\.venv\Scripts\python.exe .\main.py
 ```
 
 ---
@@ -77,7 +84,7 @@ d:\App\.venv\Scripts\python.exe d:\App\WifiDeviceScanner\main.py
 ## 📁 Cấu trúc mã nguồn
 
 ```
-d:\App\WifiDeviceScanner/
+WifiDeviceScanner/
 ├── main.py                  # Giao diện chính CustomTkinter (Dashboard, Tabs, Cards, Danh sách)
 ├── wifi_channel_analyzer.py # Trình phân tích phổ kênh sóng Wi-Fi (Bell Curve Spectrum Canvas)
 ├── lan_speedtest.py         # Đồng hồ đo tốc độ băng thông LAN (Racing Speedometer Gauge 60 FPS)
