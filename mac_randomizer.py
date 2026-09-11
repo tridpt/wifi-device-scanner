@@ -46,6 +46,27 @@ SIMULATED_PRESETS = {
 }
 
 
+def _hidden_process_kwargs() -> Dict[str, Any]:
+    """Return Windows subprocess options that prevent a console window flashing."""
+    if os.name != "nt":
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+    }
+
+
+def _run_hidden(command: List[str], **kwargs: Any) -> Any:
+    """Run a system command without creating a visible Windows console."""
+    options = _hidden_process_kwargs()
+    options.update(kwargs)
+    return subprocess.run(command, **options)
+
+
 def clean_mac(mac_str: str) -> str:
     """Chuẩn hóa MAC thành 12 ký tự Hex viết hoa."""
     clean = (mac_str or "").strip().replace(":", "").replace("-", "").replace(".", "").upper()
@@ -127,7 +148,7 @@ def get_wifi_adapter_info() -> Dict[str, Any]:
 
     # 1. Truy vấn thông tin Wi-Fi chi tiết từ netsh wlan show interfaces
     try:
-        res = subprocess.run(
+        res = _run_hidden(
             ["netsh", "wlan", "show", "interfaces"],
             capture_output=True,
             text=True,
@@ -168,8 +189,8 @@ def get_wifi_adapter_info() -> Dict[str, Any]:
             "Get-NetAdapter | Where-Object { $_.PhysicalMediaType -match '802.11' -or $_.MediaType -match '802.11' } "
             "| Select-Object -First 1 Name, InterfaceDescription, MacAddress, PermanentAddress, Status | ConvertTo-Json"
         )
-        res_ps = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_cmd],
+        res_ps = _run_hidden(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -224,7 +245,7 @@ def get_wifi_adapter_info() -> Dict[str, Any]:
     # 5. Kiểm tra chế độ MAC Randomization của profile đang kết nối
     if info["ssid"] and info["ssid"] != "Chưa kết nối":
         try:
-            p_res = subprocess.run(
+            p_res = _run_hidden(
                 ["netsh", "wlan", "show", "profile", f"name={info['ssid']}"],
                 capture_output=True,
                 text=True,
@@ -246,7 +267,7 @@ def get_saved_wifi_profiles() -> List[str]:
     """Lấy danh sách tên tất cả các mạng Wi-Fi đã lưu trên hệ thống."""
     profiles: List[str] = []
     try:
-        res = subprocess.run(
+        res = _run_hidden(
             ["netsh", "wlan", "show", "profiles"],
             capture_output=True,
             text=True,
@@ -279,7 +300,7 @@ def set_mac_randomization_for_profile(ssid: str, mode: str = "yes") -> Tuple[boo
 
     try:
         cmd = ["netsh", "wlan", "set", "profileparameter", f"name={ssid}", f"Randomization={mode.lower()}"]
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6)
+        res = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6)
         if res.returncode == 0:
             mode_desc = {
                 "yes": "Đã BẬT địa chỉ ngẫu nhiên",
@@ -315,7 +336,7 @@ def force_generate_new_random_mac(ssid: str, reconnect: bool = True) -> Tuple[bo
     try:
         # 1. Export profile
         export_cmd = ["netsh", "wlan", "export", "profile", f"name={ssid}", f"folder={temp_dir}"]
-        exp_res = subprocess.run(export_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6)
+        exp_res = _run_hidden(export_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6)
 
         # Tìm file XML được sinh ra
         if not os.path.exists(xml_path):
@@ -355,7 +376,7 @@ def force_generate_new_random_mac(ssid: str, reconnect: bool = True) -> Tuple[bo
 
         # 3. Nạp lại profile vào hệ thống
         add_cmd = ["netsh", "wlan", "add", "profile", f"filename={xml_path}", "user=all"]
-        add_res = subprocess.run(add_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6)
+        add_res = _run_hidden(add_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6)
 
         # Xóa file tạm
         try:
@@ -388,10 +409,10 @@ def reconnect_wifi(ssid: str) -> Tuple[bool, str]:
     """Ngắt và kết nối lại mạng Wi-Fi để cập nhật địa chỉ MAC và yêu cầu IP mới từ Router."""
     try:
         # Ngắt kết nối
-        subprocess.run(["netsh", "wlan", "disconnect"], capture_output=True, timeout=5)
+        _run_hidden(["netsh", "wlan", "disconnect"], capture_output=True, timeout=5)
         time.sleep(1.5)
         # Kết nối lại
-        conn_res = subprocess.run(
+        conn_res = _run_hidden(
             ["netsh", "wlan", "connect", f"name={ssid}"],
             capture_output=True,
             text=True,
@@ -409,8 +430,10 @@ def reconnect_wifi(ssid: str) -> Tuple[bool, str]:
 
 def open_windows_wifi_settings() -> bool:
     """Mở trang cài đặt phần cứng ngẫu nhiên Wi-Fi của Windows Settings."""
+    if os.name != "nt":
+        return False
     try:
-        subprocess.Popen(["cmd", "/c", "start", "ms-settings:network-wifi"])
+        os.startfile("ms-settings:network-wifi")
         return True
     except Exception:
         return False

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import struct
+import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import mac_randomizer
 from network_discovery import _build_dns_query, _read_dns_name, assess_visibility
 from network_history import NetworkHistory
 from scanner import NetworkScanner
@@ -177,6 +180,29 @@ class CameraTests(unittest.TestCase):
         ):
             result = analyze_spy_camera_risk({"ip": "192.168.1.50", "mac": "AA:BB:CC:DD:EE:FF"})
         self.assertEqual(result["risk_level"], "suspicious")
+
+
+@unittest.skipUnless(os.name == "nt", "Windows-only process behavior")
+class MacRandomizerProcessTests(unittest.TestCase):
+    def test_netsh_queries_hide_the_console_window(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("mac_randomizer.subprocess.run", return_value=completed) as run:
+            mac_randomizer.get_saved_wifi_profiles()
+
+        _, kwargs = run.call_args
+        self.assertEqual(kwargs["creationflags"], subprocess.CREATE_NO_WINDOW)
+        self.assertTrue(kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW)
+        self.assertEqual(kwargs["startupinfo"].wShowWindow, subprocess.SW_HIDE)
+
+    def test_settings_opens_directly_without_a_cmd_process(self) -> None:
+        with (
+            patch("mac_randomizer.os.startfile") as startfile,
+            patch("mac_randomizer.subprocess.Popen") as popen,
+        ):
+            self.assertTrue(mac_randomizer.open_windows_wifi_settings())
+
+        startfile.assert_called_once_with("ms-settings:network-wifi")
+        popen.assert_not_called()
 
 
 if __name__ == "__main__":
