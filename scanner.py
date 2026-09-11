@@ -14,7 +14,8 @@ import re
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from ctypes import wintypes
 from itertools import islice
-from typing import Callable, Optional, Dict, Any, List, Tuple
+from threading import Lock
+from typing import Callable, Optional, Dict, Any, List, Tuple, Iterable
 from oui_db import lookup_vendor, is_randomized_mac
 
 # Nạp các API IPv4 native của Windows. GetAdaptersInfo/GetBestInterface
@@ -311,6 +312,16 @@ def get_machine_name() -> str:
         return "Máy tính của bạn"
 
 
+def get_network_adapters() -> List[Dict[str, Any]]:
+    """Return active adapters through the locale-independent discovery helper."""
+    try:
+        from network_discovery import get_network_adapters as _get_adapters
+
+        return _get_adapters()
+    except Exception:
+        return []
+
+
 def send_arp_ping(ip_str: str) -> Optional[tuple[str, float]]:
     """
     Gửi gói tin ARP trực tiếp đến IP.
@@ -371,6 +382,8 @@ class NetworkScanner:
         self.gateway_ip = get_default_gateway() or "192.168.1.1"
         self.wifi_ssid = get_wifi_ssid()
         self.machine_name = get_machine_name()
+        self.adapters = get_network_adapters()
+        self.selected_adapter_indices: List[Any] = []
 
     def refresh_network_info(self):
         """Cập nhật lại thông tin cấu hình mạng máy."""
@@ -378,6 +391,11 @@ class NetworkScanner:
         self.gateway_ip = get_default_gateway() or "192.168.1.1"
         self.wifi_ssid = get_wifi_ssid()
         self.machine_name = get_machine_name()
+        self.adapters = get_network_adapters()
+
+    def set_selected_adapters(self, indices: Optional[Iterable[Any]]) -> None:
+        """Restrict automatic scans to adapter interface indexes supplied by the UI."""
+        self.selected_adapter_indices = list(indices or [])
 
     def stop_scan(self):
         """Yêu cầu dừng tiến trình quét."""
@@ -390,6 +408,12 @@ class NetworkScanner:
         on_progress: Optional[Callable[[int, int], None]] = None,
         on_completed: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         max_threads: int = 64,
+        retries: int = 1,
+        rate_limit_ms: float = 0.0,
+        max_hosts: int = 2048,
+        include_ipv6: bool = False,
+        adapter_configs: Optional[Iterable[Dict[str, Any]]] = None,
+        scan_mode: str = "full",
     ):
         """
         Quét dải mạng LAN / Wi-Fi.
@@ -400,47 +424,104 @@ class NetworkScanner:
         self.should_stop = False
         self.refresh_network_info()
 
-        # Xác định dải IP cần quét dựa trên Subnet thực tế
+        # Xác định dải IP cần quét dựa trên Subnet thực tế.  Dùng islice và
+        # batch futures để CIDR lớn không bao giờ materialize hàng triệu IP.
         target_ips: List[str] = []
+        try:
+            max_hosts = max(1, min(int(max_hosts), 65536))
+        except (TypeError, ValueError):
+            max_hosts = 2048
+        if str(scan_mode).lower() == "quick":
+            max_hosts = min(max_hosts, 256)
+        try:
+            retries = max(1, min(int(retries), 4))
+        except (TypeError, ValueError):
+            retries = 1
+        try:
+            rate_limit_ms = max(0.0, min(float(rate_limit_ms), 1000.0))
+        except (TypeError, ValueError):
+            rate_limit_ms = 0.0
+
+        def append_hosts(network: ipaddress.IPv4Network) -> None:
+            remaining = max_hosts - len(target_ips)
+            if remaining > 0:
+                target_ips.extend(str(h) for h in islice(network.hosts(), remaining))
 
         if base_subnet:
             try:
                 # Trường hợp truyền CIDR như "192.168.1.0/24" hoặc "192.168.0.0/23"
                 if "/" in base_subnet:
                     net = ipaddress.IPv4Network(base_subnet.strip(), strict=False)
-                    if net.num_addresses <= 2048:
-                        target_ips = [str(h) for h in net.hosts()]
-                    else:
-                        # islice giữ giới hạn mà không materialize toàn bộ subnet.
-                        target_ips = [str(h) for h in islice(net.hosts(), 2048)]
+                    append_hosts(net)
                 elif base_subnet.endswith("."):
                     # Trường hợp truyền prefix dạng "192.168.1."
-                    target_ips = [f"{base_subnet}{i}" for i in range(1, 255)]
+                    target_ips = [f"{base_subnet}{i}" for i in range(1, min(255, max_hosts + 1))]
             except Exception:
                 pass
 
         if not target_ips:
-            try:
-                net = ipaddress.IPv4Network(f"{self.local_ip}/{self.subnet_mask}", strict=False)
-                # Nếu subnet <= 1024 hosts (chuẩn /24, /23, /22), quét toàn bộ hosts
-                if net.num_addresses <= 1024:
-                    target_ips = [str(h) for h in net.hosts()]
-                else:
-                    # Nếu subnet quá lớn (/16 có 65.534 máy), quét block /24 bao quanh máy này để đảm bảo tốc độ
+            configs = list(adapter_configs or [])
+            if not configs:
+                configs = list(self.adapters or [])
+            selected = set(self.selected_adapter_indices or [])
+            if selected:
+                configs = [c for c in configs if c.get("index") in selected or c.get("interface_index") in selected]
+            for config in configs:
+                for address in config.get("ipv4", []) or []:
+                    try:
+                        # PowerShell may return address/prefix objects or plain text.
+                        if isinstance(address, dict):
+                            ip_value = address.get("IPv4Address") or address.get("IPAddress") or ""
+                            prefix = address.get("PrefixLength")
+                            if prefix is not None:
+                                append_hosts(ipaddress.IPv4Network(f"{ip_value}/{prefix}", strict=False))
+                                continue
+                        else:
+                            address_text = str(address)
+                            address_parts = address_text.split("/", 1)
+                            ip_value = address_parts[0]
+                            prefix = address_parts[1] if len(address_parts) > 1 else None
+                        if ip_value:
+                            append_hosts(ipaddress.IPv4Network(f"{ip_value}/{prefix or self.subnet_mask}", strict=False))
+                    except (TypeError, ValueError):
+                        continue
+            if not target_ips:
+                try:
+                    net = ipaddress.IPv4Network(f"{self.local_ip}/{self.subnet_mask}", strict=False)
+                    append_hosts(net)
+                except Exception:
                     parts = self.local_ip.split(".")
-                    target_ips = [f"{parts[0]}.{parts[1]}.{parts[2]}.{i}" for i in range(1, 255)]
-            except Exception:
-                parts = self.local_ip.split(".")
-                target_ips = [f"{parts[0]}.{parts[1]}.{parts[2]}.{i}" for i in range(1, 255)]
+                    target_ips = [f"{parts[0]}.{parts[1]}.{parts[2]}.{i}" for i in range(1, min(255, max_hosts + 1))]
+
+        # De-duplicate while retaining order when multiple adapters overlap.
+        target_ips = list(dict.fromkeys(target_ips))[:max_hosts]
 
         total = len(target_ips)
         scanned_count = 0
         found_devices: List[Dict[str, Any]] = []
 
+        rate_lock = Lock()
+        next_allowed = [0.0]
+
         def worker(ip: str):
             if self.should_stop:
                 return None
-            res = send_arp_ping(ip)
+            res = None
+            for attempt in range(retries):
+                if self.should_stop:
+                    return None
+                if rate_limit_ms:
+                    with rate_lock:
+                        now = time.monotonic()
+                        wait_for = next_allowed[0] - now
+                        if wait_for > 0:
+                            time.sleep(wait_for)
+                        next_allowed[0] = time.monotonic() + rate_limit_ms / 1000.0
+                res = send_arp_ping(ip)
+                if res:
+                    break
+                if attempt + 1 < retries:
+                    time.sleep(0.01)
             if res:
                 mac, rtt = res
                 vendor, hint, category = lookup_vendor(mac)
@@ -457,6 +538,18 @@ class NetworkScanner:
                 else:
                     device_name = resolve_hostname(ip)
 
+                hostname_source = "netbios" if device_name != "—" else ""
+                if device_name == "—":
+                    try:
+                        from network_discovery import resolve_hostname_sources
+
+                        hostname_info = resolve_hostname_sources(ip)
+                        if hostname_info.get("hostname"):
+                            device_name = hostname_info["hostname"]
+                            hostname_source = hostname_info.get("source", "reverse-dns")
+                    except Exception:
+                        pass
+
                 device_info = {
                     "ip": ip,
                     "mac": mac,
@@ -468,42 +561,49 @@ class NetworkScanner:
                     "is_gateway": is_gateway,
                     "is_self": is_self,
                     "is_random_mac": is_randomized_mac(mac),
+                    "confidence": 0.62,
+                    "confidence_label": "trung bình",
+                    "hostname_source": hostname_source,
                 }
                 return device_info
             return None
 
         last_progress_time = 0.0
-        executor = ThreadPoolExecutor(max_workers=max_threads)
+        executor = ThreadPoolExecutor(max_workers=max(1, min(int(max_threads), 128)))
         future_to_ip = {}
         try:
-            future_to_ip = {executor.submit(worker, ip): ip for ip in target_ips}
-            pending = set(future_to_ip)
-            while pending and not self.should_stop:
-                # Timeout ngắn giúp nút Stop được xử lý ngay cả khi ARP đang chờ.
-                done, pending = wait(
-                    pending,
-                    timeout=0.05,
-                    return_when=FIRST_COMPLETED,
-                )
-                for future in done:
-                    scanned_count += 1
-                    now = time.time()
-                    # Giới hạn cập nhật tiến trình tối đa ~15 lần/giây để không làm nghẽn UI loop
-                    if on_progress and (scanned_count == total or (now - last_progress_time >= 0.07)):
-                        last_progress_time = now
+            # Giữ số future đang bay nhỏ để stop/cancel có hiệu lực ngay cả với
+            # subnet lớn.  Mỗi lô tối đa 4 lần số worker.
+            batch_size = max(1, min(len(target_ips), max(1, int(max_threads)) * 4))
+            for start in range(0, len(target_ips), batch_size):
+                if self.should_stop:
+                    break
+                batch = target_ips[start : start + batch_size]
+                future_to_ip = {executor.submit(worker, ip): ip for ip in batch}
+                pending = set(future_to_ip)
+                while pending and not self.should_stop:
+                    done, pending = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        scanned_count += 1
+                        now = time.time()
+                        if on_progress and (scanned_count == total or (now - last_progress_time >= 0.07)):
+                            last_progress_time = now
+                            try:
+                                on_progress(scanned_count, total)
+                            except Exception:
+                                pass
                         try:
-                            on_progress(scanned_count, total)
+                            dev = future.result()
+                            if dev:
+                                found_devices.append(dev)
+                                if on_device_found:
+                                    on_device_found(dev)
                         except Exception:
                             pass
-
-                    try:
-                        dev = future.result()
-                        if dev:
-                            found_devices.append(dev)
-                            if on_device_found:
-                                on_device_found(dev)
-                    except Exception:
-                        pass
+                if self.should_stop:
+                    for future in pending:
+                        future.cancel()
+                    break
         finally:
             if self.should_stop:
                 # Hủy các job đang chờ; các ARP đã chạy sẽ tự kết thúc ở worker.
@@ -523,6 +623,14 @@ class NetworkScanner:
                 return int(d["ip"].split(".")[-1])
             except Exception:
                 return 999
+
+        if include_ipv6:
+            try:
+                from network_discovery import enrich_devices, get_ipv6_neighbors
+
+                found_devices = enrich_devices(found_devices, ipv6_neighbors=get_ipv6_neighbors())
+            except Exception:
+                pass
 
         found_devices.sort(key=sort_key)
         self.is_scanning = False

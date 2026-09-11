@@ -1,10 +1,9 @@
 """
-mac_randomizer.py - Trình Đổi Danh Tính Card Mạng (MAC Address Randomizer / MAC Spoofing).
-Giúp xóa sạch lịch sử nhận diện máy trên Router quản lý tòa nhà và vượt qua giới hạn
-thời gian dùng thử Wi-Fi miễn phí (30 phút tại quán cafe, sân bay, khách sạn).
+mac_randomizer.py - Công cụ quản lý MAC riêng tư trên thiết bị của người dùng.
 
 Áp dụng chuẩn IEEE 802.11 Locally Administered Addresses (LAA) và cơ chế
-Windows Native Hardware MAC Randomization (zero crash driver, zero UAC prompt).
+Windows Native Hardware MAC Randomization. Chỉ sử dụng trên adapter bạn sở hữu
+hoặc được quản trị; không dùng để né chính sách truy cập hay giới hạn dịch vụ.
 """
 
 import os
@@ -417,28 +416,28 @@ def open_windows_wifi_settings() -> bool:
         return False
 
 
-def get_mac_bypass_tips() -> List[Dict[str, str]]:
-    """Cẩm nang hướng dẫn mẹo vượt giới hạn 30 phút Wi-Fi Cafe / Sân bay / Khách sạn."""
+def get_mac_privacy_tips() -> List[Dict[str, str]]:
+    """Return lawful privacy and connection-troubleshooting guidance."""
     return [
         {
-            "step": "1. Khi hết 30 phút Wi-Fi miễn phí",
-            "desc": "Tại các quán cafe, khách sạn, sân bay (Highlands, Trung Nguyên, Airport Wi-Fi...), hệ thống Captive Portal ghi nhớ địa chỉ MAC máy bạn để khóa sau 30-60 phút.",
+            "step": "1. Bảo vệ quyền riêng tư",
+            "desc": "Dùng địa chỉ LAA để giảm việc các mạng bạn quản lý liên kết hoạt động của thiết bị qua MAC phần cứng.",
         },
         {
-            "step": "2. Bấm '1-Click Đổi MAC Mới'",
-            "desc": "Ứng dụng sẽ tự động sinh một hạt giống MAC mới và ngắt kết nối trong 1.5 giây. Khi kết nối lại, máy bạn mang một địa chỉ MAC hoàn toàn lạ.",
+            "step": "2. Chỉ áp dụng trên adapter của bạn",
+            "desc": "Đổi MAC có thể làm mất kết nối hoặc cần đăng nhập lại mạng; hãy lưu cấu hình hiện tại trước khi thử.",
         },
         {
-            "step": "3. Router nhận diện là khách mới 100%",
-            "desc": "Bộ định tuyến (Router) không còn nhận ra bạn là máy cũ nữa. Nó sẽ cấp một địa chỉ IP mới và kích hoạt lại gói dùng thử 30 phút miễn phí.",
+            "step": "3. Tôn trọng chính sách mạng",
+            "desc": "Không dùng MAC randomization để né captive portal, khóa truy cập, thanh toán hoặc cơ chế kiểm soát của quản trị viên.",
         },
         {
-            "step": "4. Mở trang đăng nhập chào mừng",
-            "desc": "Mở trình duyệt (hoặc vào tab ẩn danh / Incognito truy cập http://neverssl.com hoặc http://1.1.1.1). Trang chào mừng đăng nhập 30 phút miễn phí sẽ hiện ra ngay lập tức!",
+            "step": "4. Khắc phục kết nối",
+            "desc": "Nếu mạng yêu cầu đăng nhập lại, mở trang cổng thông báo theo hướng dẫn của nhà cung cấp hoặc liên hệ quản trị viên.",
         },
         {
-            "step": "5. Xóa sạch lịch sử theo dõi tòa nhà",
-            "desc": "Khi bạn chuyển sang MAC ngẫu nhiên mỗi ngày, quản trị viên mạng tòa nhà/công ty sẽ không thể xâu chuỗi thói quen truy cập của bạn qua các ngày.",
+            "step": "5. Khôi phục khi cần",
+            "desc": "Tắt tính năng hoặc khôi phục MAC phần cứng nếu gặp lỗi DHCP, lọc MAC, cấp phép thiết bị hoặc chẩn đoán sự cố.",
         },
     ]
 
@@ -491,7 +490,7 @@ class MacRandomizerWindow(ctk.CTkToplevel):
 
         lbl_sub = ctk.CTkLabel(
             header,
-            text="Đổi ngẫu nhiên địa chỉ MAC Wi-Fi chỉ với 1 click — Vượt giới hạn 30 phút Wi-Fi Cafe & Xóa dấu vết Router",
+            text="Đổi địa chỉ MAC để tăng quyền riêng tư trên adapter bạn quản lý",
             font=ctk.CTkFont(size=12),
             text_color=("#64748B", "#94A3B8"),
             anchor="w",
@@ -525,7 +524,7 @@ class MacRandomizerWindow(ctk.CTkToplevel):
         # C. THẺ TRÌNH TẠO MAC & GIẢ LẬP HÃNG (Generator Card)
         self._build_generator_card(self.scroll)
 
-        # D. THẺ CẨM NANG VƯỢT GIỚI HẠN 30 PHÚT (Guide Card)
+        # D. THẺ HƯỚNG DẪN RIÊNG TƯ HỢP PHÁP (Guide Card)
         self._build_guide_card(self.scroll)
 
         # ---------------- 3. FOOTER STATUS BAR ----------------
@@ -789,7 +788,7 @@ class MacRandomizerWindow(ctk.CTkToplevel):
         self._generate_sample_mac()
 
     def _build_guide_card(self, parent):
-        """Thẻ cẩm nang vượt giới hạn 30 phút Wi-Fi Cafe."""
+        """Thẻ hướng dẫn sử dụng MAC randomization an toàn và hợp pháp."""
         card = ctk.CTkFrame(parent, corner_radius=10, fg_color=("#FFFFFF", "#1E293B"), border_width=1, border_color=("#E2E8F0", "#334155"))
         card.grid(row=3, column=0, sticky="ew", padx=5, pady=8)
         card.grid_columnconfigure(0, weight=1)
@@ -797,13 +796,13 @@ class MacRandomizerWindow(ctk.CTkToplevel):
         # Tiêu đề Card
         ctk.CTkLabel(
             card,
-            text="📖 CẨM NANG VƯỢT GIỚI HẠN 30 PHÚT WI-FI CAFE & SÂN BAY",
+            text="📖 HƯỚNG DẪN RIÊNG TƯ & KHẮC PHỤC KẾT NỐI",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=("#6366F1", "#818CF8"),
             anchor="w",
         ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
 
-        tips = get_mac_bypass_tips()
+        tips = get_mac_privacy_tips()
         for idx, tip in enumerate(tips):
             tip_box = ctk.CTkFrame(card, fg_color=("#F8FAFC", "#0F172A"), corner_radius=6)
             tip_box.grid(row=idx + 1, column=0, sticky="ew", padx=16, pady=3)
@@ -967,8 +966,8 @@ class MacRandomizerWindow(ctk.CTkToplevel):
         reconnect = bool(self.chk_reconnect.get())
         msg = (
             f"Bạn có muốn đổi sang một địa chỉ MAC ngẫu nhiên hoàn toàn MỚI cho mạng '{target_ssid}'?\n\n"
-            f"- Router sẽ nhận diện máy bạn như một thiết bị mới toanh.\n"
-            f"- Gói dùng thử Wi-Fi miễn phí (30-60 phút) sẽ được làm mới.\n"
+            f"- Địa chỉ LAA mới chỉ phục vụ mục đích riêng tư trên adapter bạn quản lý.\n"
+            f"- Một số mạng có thể yêu cầu đăng nhập lại hoặc từ chối thiết bị; hãy tuân thủ chính sách của quản trị viên.\n"
         )
         if reconnect and target_ssid == self.adapter_info.get("ssid"):
             msg += "- Kết nối Wi-Fi sẽ ngắt và tự động kết nối lại sau 1-2 giây."

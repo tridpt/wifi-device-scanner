@@ -5,7 +5,7 @@ export_utils.py - Xuất danh sách thiết bị ra file CSV (chuẩn UTF-8 có 
 import csv
 import json
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 def export_to_csv(devices: List[Dict[str, Any]], filepath: str) -> bool:
@@ -19,11 +19,17 @@ def export_to_csv(devices: List[Dict[str, Any]], filepath: str) -> bool:
             writer.writerow([
                 "STT",
                 "Địa chỉ IP",
+                "Địa chỉ IPv6",
                 "Địa chỉ MAC",
                 "Tên thiết bị (Hostname)",
+                "Tên tùy chỉnh",
+                "Phòng / khu vực",
+                "Tin cậy",
                 "Nhà sản xuất (Hãng)",
                 "Mô tả / Loại thiết bị",
                 "Phản hồi (ms)",
+                "Độ tin cậy (%)",
+                "Discovery",
                 "Loại thiết bị đặc biệt",
                 "Thời gian quét",
             ])
@@ -41,11 +47,17 @@ def export_to_csv(devices: List[Dict[str, Any]], filepath: str) -> bool:
                 writer.writerow([
                     idx,
                     d.get("ip", ""),
+                    d.get("ipv6", ""),
                     d.get("mac", ""),
                     d.get("name", "—"),
+                    d.get("alias", ""),
+                    d.get("room", ""),
+                    "Có" if d.get("trusted") else "Không",
                     d.get("vendor", "Chưa rõ"),
                     d.get("hint", ""),
                     f"{d.get('rtt_ms', 0)} ms",
+                    f"{float(d.get('confidence')) * 100:.0f}%" if isinstance(d.get("confidence"), (int, float)) else "",
+                    d.get("discovery", ""),
                     ", ".join(special_tag) if special_tag else "Bình thường",
                     scan_time,
                 ])
@@ -55,7 +67,12 @@ def export_to_csv(devices: List[Dict[str, Any]], filepath: str) -> bool:
         return False
 
 
-def export_to_json(devices: List[Dict[str, Any]], filepath: str) -> bool:
+def export_to_json(
+    devices: List[Dict[str, Any]],
+    filepath: str,
+    scan_result: Optional[Dict[str, Any]] = None,
+    security_result: Optional[Dict[str, Any]] = None,
+) -> bool:
     """
     Xuất danh sách thiết bị ra file JSON.
     """
@@ -65,6 +82,10 @@ def export_to_json(devices: List[Dict[str, Any]], filepath: str) -> bool:
             "device_count": len(devices),
             "devices": devices,
         }
+        if scan_result is not None:
+            data["scan"] = scan_result
+        if security_result is not None:
+            data["security"] = security_result
         with open(filepath, mode="w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return True

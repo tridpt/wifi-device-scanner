@@ -23,9 +23,9 @@
    - Thanh tìm kiếm và bộ lọc nhanh theo IP, MAC, Tên máy, Hãng sản xuất.
    - Nút copy nhanh IP / MAC và nút vào trang quản trị modem 1 chạm.
 4. **Trình Đổi Danh Tính Card Mạng (MAC Address Randomizer / MAC Spoofing)**:
-   - Đổi ngẫu nhiên địa chỉ MAC Wi-Fi chỉ với 1 cú click (Zero UAC, không can thiệp driver).
-   - Tự động ngắt & kết nối lại để Router cấp IP mới, xóa sạch lịch sử nhận diện máy trên Router tòa nhà.
-   - Vượt qua giới hạn thời gian dùng thử Wi-Fi miễn phí (30-60 phút) tại quán cafe, sân bay, khách sạn.
+   - Đổi ngẫu nhiên địa chỉ MAC Wi-Fi trên adapter do bạn sở hữu/quản trị (Zero UAC khi Windows cho phép).
+   - Hỗ trợ khôi phục cấu hình và hướng dẫn xử lý DHCP/captive portal theo chính sách của quản trị viên.
+   - Không dùng để né captive portal, khóa truy cập, thanh toán hoặc cơ chế kiểm soát của mạng khác.
 5. **Soi Luồng Video Camera & Kiểm Tra Khóa Mật Khẩu (RTSP Streamer & Auth Checker)**:
    - Dò luồng RTSP camera theo từng hãng (Hikvision, Dahua, Imou, Tapo, Yoosee, Tuya) và mở xem trực tiếp bằng VLC Player.
    - Kiểm tra xem camera có đang được bảo vệ bằng mật khẩu (401 Unauthorized) hay bị mở toang (200 OK).
@@ -54,6 +54,20 @@
    - Quét toàn bộ mạng Wi-Fi và BSSID nhà hàng xóm, nhận diện can nhiễu đồng kênh (Co-Channel) và kênh kề.
    - **Tự động xếp hạng & đề xuất kênh tối ưu (Smart Channel Rating)**: Đánh giá mật độ phân bổ và chỉ ra kênh sạch nhất (1, 6, 11 trên 2.4 GHz hoặc 36, 40, 44... trên 5 GHz) để đổi trên Router.
    - Tương tác rê chuột (Hover Tooltip): Hiển thị tên mạng, BSSID, Hãng sản xuất modem qua MAC OUI, Cường độ sóng và mức chiếm dụng kênh.
+
+12. **Lịch sử mạng & cảnh báo thay đổi (SQLite)**:
+   - Lưu snapshot theo từng lần quét tại `%LOCALAPPDATA%\\WifiDeviceScanner\\history.db`.
+   - Phát hiện thiết bị mới, biến mất, đổi IP hoặc đổi MAC; thông báo Windows khi có thay đổi.
+   - Cho phép đặt tên, phòng, ghi chú và đánh dấu thiết bị tin cậy. Annotation được giữ lại khi thiết bị đổi IP/MAC nếu có thể ghép nối.
+13. **Discovery đa nguồn & độ tin cậy**:
+   - Hỗ trợ IPv6 neighbor cache, mDNS, SSDP/UPnP và reverse-DNS/NetBIOS hostname.
+   - Chọn nhiều adapter, retry/rate-limit và giới hạn an toàn cho CIDR lớn; hiển thị cảnh báo AP/client isolation hoặc VLAN thay vì khẳng định tuyệt đối.
+14. **Security dashboard có bằng chứng**:
+   - Kiểm tra SMB guest (negotiate-only, trạng thái guest vẫn ghi `unverified` nếu chưa xác minh), UPnP, Telnet, HTTP/HTTPS quản trị và DNS.
+   - Mỗi finding gồm trạng thái, banner/response quan sát được, độ tin cậy và cách khắc phục. Cổng RTSP chỉ được hiển thị là nghi vấn cho tới khi handshake/banner xác minh.
+15. **Báo cáo chia sẻ được**:
+   - Xuất HTML tự chứa hoặc PDF ngang A4; báo cáo gồm thiết bị, lịch sử, độ phủ quan sát và findings bảo mật.
+   - Bộ lọc theo loại thiết bị, phòng và mức rủi ro; chế độ `Quét nhanh`, `Quét đầy đủ`, `Chỉ thiết bị mới`.
 
 ---
 
@@ -102,5 +116,9 @@ WifiDeviceScanner/
 ├── scanner.py               # Engine quét mạng ARP đa luồng tốc độ cao
 ├── oui_db.py                # Cơ sở dữ liệu nhận diện hãng sản xuất OUI & MAC bảo mật
 ├── export_utils.py          # Tiện ích xuất dữ liệu ra file CSV và JSON
+├── network_history.py       # SQLite snapshot, annotation và cảnh báo thay đổi
+├── network_discovery.py     # IPv6 neighbor, mDNS, SSDP/UPnP và confidence score
+├── report_utils.py          # Báo cáo HTML/PDF tự chứa, có bằng chứng/khắc phục
+├── notifications.py         # Windows toast notification (fallback an toàn)
 └── README.md                # Tài liệu hướng dẫn sử dụng
 ```

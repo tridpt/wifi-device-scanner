@@ -1,2 +1,6 @@
 customtkinter==5.2.2
 Pillow==12.2.0
+# Tạo báo cáo PDF offline (HTML vẫn hoạt động nếu thư viện này chưa có)
+reportlab>=4.0
+# Toast notification Windows (ứng dụng vẫn chạy với fallback beep nếu thiếu)
+winotify>=1.1.1; platform_system == "Windows"
