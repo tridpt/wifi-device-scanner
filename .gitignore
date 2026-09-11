@@ -1,0 +1,21 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+
+# PyInstaller output
+build/
+dist/
+*.exe
+
+# Local app data
+saved_wol_devices.json
+mk.txt
+
+# Editor and OS files
+.vscode/
+.idea/
+*.log
+Thumbs.db
+Desktop.ini
