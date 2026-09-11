@@ -295,7 +295,7 @@ def set_mac_randomization_for_profile(ssid: str, mode: str = "yes") -> Tuple[boo
 
 def force_generate_new_random_mac(ssid: str, reconnect: bool = True) -> Tuple[bool, str, Optional[int]]:
     """
-    Bắt buộc tạo một danh tính MAC ngẫu nhiên MỚI NGAY LẬP TỨC cho profile Wi-Fi:
+    Tạo một địa chỉ MAC LAA mới cho profile Wi-Fi do người dùng quản lý:
     1. Xuất profile sang file XML tạm thời.
     2. Tạo một randomizationSeed ngẫu nhiên 32-bit mới.
     3. Cập nhật thẻ <MacRandomization> và <randomizationSeed>.
@@ -443,17 +443,17 @@ def get_mac_privacy_tips() -> List[Dict[str, str]]:
 
 
 # =====================================================================
-# GIAO DIỆN CỬA SỔ TRÌNH ĐỔI DANH TÍNH CARD MẠNG (MacRandomizerWindow)
+# GIAO DIỆN CỬA SỔ QUẢN LÝ MAC RIÊNG TƯ (MacRandomizerWindow)
 # =====================================================================
 
 
 class MacRandomizerWindow(ctk.CTkToplevel):
-    """Cửa sổ Trình Đổi Danh Tính Card Mạng (MAC Address Randomizer / Spoofing)."""
+    """Cửa sổ quản lý MAC riêng tư cho adapter do người dùng quản lý."""
 
     def __init__(self, master):
         super().__init__(master)
 
-        self.title("🎭 Trình Đổi Danh Tính Card Mạng — MAC Randomizer & Spoofing")
+        self.title("🎭 Quản lý MAC riêng tư — MAC Randomizer")
         self.geometry("820x760")
         self.minsize(720, 640)
 
@@ -638,7 +638,7 @@ class MacRandomizerWindow(ctk.CTkToplevel):
         # Tiêu đề Card
         ctk.CTkLabel(
             card,
-            text="⚡ BẢNG ĐIỀU KHIỂN ĐỔI DANH TÍNH 1-CLICK (1-CLICK SPOOFER)",
+            text="⚡ QUẢN LÝ ĐỊA CHỈ MAC RIÊNG TƯ",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=("#10B981", "#34D399"),
             anchor="w",
@@ -662,7 +662,7 @@ class MacRandomizerWindow(ctk.CTkToplevel):
 
         self.chk_reconnect = ctk.CTkCheckBox(
             sel_frame,
-            text="Tự động kết nối lại Wi-Fi sau khi đổi để lấy IP mới ngay",
+            text="Tự động kết nối lại Wi-Fi sau khi áp dụng cấu hình",
             font=ctk.CTkFont(size=12),
         )
         self.chk_reconnect.grid(row=0, column=2, padx=(15, 0), sticky="e")
@@ -673,10 +673,10 @@ class MacRandomizerWindow(ctk.CTkToplevel):
         btn_grid.grid(row=2, column=0, sticky="ew", padx=16, pady=(5, 16))
         btn_grid.grid_columnconfigure((0, 1, 2), weight=1)
 
-        # 1. Nút 1-Click Đổi MAC Mới (Lớn nhất, màu Xanh Ngọc)
+        # 1. Áp dụng địa chỉ MAC riêng tư mới (Lớn nhất, màu Xanh Ngọc)
         self.btn_force_random = ctk.CTkButton(
             btn_grid,
-            text="🎲 1-CLICK ĐỔI MAC MỚI\n(Lấy 30 Phút Wi-Fi Mới Ngay)",
+            text="🎲 ÁP DỤNG MAC RIÊNG TƯ\n(Địa chỉ LAA mới)",
             font=ctk.CTkFont(size=13, weight="bold"),
             height=52,
             fg_color="#10B981",
@@ -965,7 +965,7 @@ class MacRandomizerWindow(ctk.CTkToplevel):
 
         reconnect = bool(self.chk_reconnect.get())
         msg = (
-            f"Bạn có muốn đổi sang một địa chỉ MAC ngẫu nhiên hoàn toàn MỚI cho mạng '{target_ssid}'?\n\n"
+            f"Bạn có muốn áp dụng một địa chỉ MAC LAA ngẫu nhiên mới cho mạng '{target_ssid}'?\n\n"
             f"- Địa chỉ LAA mới chỉ phục vụ mục đích riêng tư trên adapter bạn quản lý.\n"
             f"- Một số mạng có thể yêu cầu đăng nhập lại hoặc từ chối thiết bị; hãy tuân thủ chính sách của quản trị viên.\n"
         )
@@ -989,7 +989,7 @@ class MacRandomizerWindow(ctk.CTkToplevel):
                     messagebox.showinfo(
                         "Đổi Danh Tính Thành Công",
                         f"🎉 THÀNH CÔNG!\n\n{text}\n\nĐịa chỉ MAC hiện tại: {new_info.get('active_mac')}\n\n"
-                        "💡 Mẹo: Hãy mở trình duyệt truy cập http://neverssl.com hoặc http://1.1.1.1 để trang đăng nhập chào mừng 30 phút hiện ra lại ngay!",
+                        "💡 Nếu kết nối bị ngắt, hãy kết nối lại theo chính sách của mạng hoặc liên hệ quản trị viên.",
                         parent=self,
                     )
                 else:

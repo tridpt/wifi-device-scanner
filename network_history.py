@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -75,8 +76,21 @@ class NetworkHistory:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    @contextmanager
+    def _connection(self):
+        """Commit or roll back a transaction, then release the Windows file handle."""
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _initialise(self) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS scans (
@@ -156,20 +170,8 @@ class NetworkHistory:
             ).fetchall()
         )
 
-    def get_device_metadata(self, device_or_fingerprint: Any) -> Dict[str, Any]:
-        fingerprint = (
-            device_or_fingerprint
-            if isinstance(device_or_fingerprint, str)
-            else device_fingerprint(device_or_fingerprint or {})
-        )
-        with self._lock, self._connect() as conn:
-            row = conn.execute(
-                "SELECT fingerprint, alias, notes, room, trusted, updated_at "
-                "FROM device_metadata WHERE fingerprint = ?",
-                (fingerprint,),
-            ).fetchone()
-        if not row:
-            return {"fingerprint": fingerprint, "alias": "", "notes": "", "room": "", "trusted": False}
+    @staticmethod
+    def _metadata_from_row(row: sqlite3.Row) -> Dict[str, Any]:
         return {
             "fingerprint": row["fingerprint"],
             "alias": row["alias"],
@@ -178,6 +180,46 @@ class NetworkHistory:
             "trusted": bool(row["trusted"]),
             "updated_at": row["updated_at"],
         }
+
+    def _metadata_map(self, conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+        """Load saved annotations once for a snapshot rather than per device."""
+        rows = conn.execute(
+            "SELECT fingerprint, alias, notes, room, trusted, updated_at FROM device_metadata"
+        ).fetchall()
+        return {row["fingerprint"]: self._metadata_from_row(row) for row in rows}
+
+    @staticmethod
+    def _apply_metadata_from_map(device: Dict[str, Any], metadata_by_fp: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        result = dict(device)
+        fingerprint = device_fingerprint(result)
+        meta = metadata_by_fp.get(
+            fingerprint,
+            {"fingerprint": fingerprint, "alias": "", "notes": "", "room": "", "trusted": False},
+        )
+        result["fingerprint"] = fingerprint
+        result["alias"] = meta.get("alias", "")
+        result["notes"] = meta.get("notes", "")
+        result["room"] = meta.get("room", "")
+        result["trusted"] = bool(meta.get("trusted", False))
+        if result["alias"]:
+            result["display_name"] = result["alias"]
+        return result
+
+    def get_device_metadata(self, device_or_fingerprint: Any) -> Dict[str, Any]:
+        fingerprint = (
+            device_or_fingerprint
+            if isinstance(device_or_fingerprint, str)
+            else device_fingerprint(device_or_fingerprint or {})
+        )
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                "SELECT fingerprint, alias, notes, room, trusted, updated_at "
+                "FROM device_metadata WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+        if not row:
+            return {"fingerprint": fingerprint, "alias": "", "notes": "", "room": "", "trusted": False}
+        return self._metadata_from_row(row)
 
     def set_device_metadata(
         self,
@@ -200,7 +242,7 @@ class NetworkHistory:
             "trusted": int(current.get("trusted", False) if trusted is None else bool(trusted)),
         }
         now = _utc_now()
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO device_metadata(fingerprint, alias, notes, room, trusted, updated_at)
@@ -240,16 +282,16 @@ class NetworkHistory:
 
     def apply_metadata(self, device: Dict[str, Any]) -> Dict[str, Any]:
         """Return a copy enriched with the saved alias/room/trusted fields."""
-        result = dict(device)
-        meta = self.get_device_metadata(device)
-        result["fingerprint"] = meta["fingerprint"]
-        result["alias"] = meta.get("alias", "")
-        result["notes"] = meta.get("notes", "")
-        result["room"] = meta.get("room", "")
-        result["trusted"] = bool(meta.get("trusted", False))
-        if result["alias"]:
-            result["display_name"] = result["alias"]
-        return result
+        return self.apply_metadata_many([device])[0]
+
+    def apply_metadata_many(self, devices: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Enrich many devices with one metadata query and one SQLite handle."""
+        device_list = [dict(device) for device in devices if isinstance(device, dict)]
+        if not device_list:
+            return []
+        with self._lock, self._connection() as conn:
+            metadata_by_fp = self._metadata_map(conn)
+        return [self._apply_metadata_from_map(device, metadata_by_fp) for device in device_list]
 
     @staticmethod
     def _device_value(device: Dict[str, Any], key: str) -> str:
@@ -276,9 +318,17 @@ class NetworkHistory:
         completed = _utc_now()
         adapter_list = list(adapters or [])
         visibility = visibility or {}
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             previous_rows = self._latest_snapshot_rows(conn)
             previous = {row["fingerprint"]: self._row_device(row) for row in previous_rows}
+            metadata_by_fp = self._metadata_map(conn)
+
+            def metadata_for(fingerprint: str) -> Dict[str, Any]:
+                return metadata_by_fp.get(
+                    fingerprint,
+                    {"fingerprint": fingerprint, "alias": "", "notes": "", "room": "", "trusted": False},
+                )
+
             previous_by_ip = {
                 self._device_value(d, "ip"): (fp, d)
                 for fp, d in previous.items()
@@ -313,7 +363,7 @@ class NetworkHistory:
                 device = dict(original)
                 fp = device_fingerprint(device)
                 current_fps.add(fp)
-                meta = self.get_device_metadata(fp)
+                meta = metadata_for(fp)
                 # Preserve annotations in the materialized snapshot for easy exports.
                 device.update(
                     {
@@ -343,8 +393,8 @@ class NetworkHistory:
                     # Carry user annotations across an IP/MAC change when the
                     # new fingerprint has no explicit metadata yet.
                     if old_fp != fp:
-                        old_meta = self.get_device_metadata(old_fp)
-                        new_meta = self.get_device_metadata(fp)
+                        old_meta = metadata_for(old_fp)
+                        new_meta = metadata_for(fp)
                         if (
                             not new_meta.get("alias")
                             and not new_meta.get("notes")
@@ -352,7 +402,7 @@ class NetworkHistory:
                             and not new_meta.get("trusted")
                             and any((old_meta.get("alias"), old_meta.get("notes"), old_meta.get("room"), old_meta.get("trusted")))
                         ):
-                            self._upsert_metadata_conn(
+                            stamp = self._upsert_metadata_conn(
                                 conn,
                                 fp,
                                 alias=old_meta.get("alias", ""),
@@ -360,6 +410,14 @@ class NetworkHistory:
                                 room=old_meta.get("room", ""),
                                 trusted=old_meta.get("trusted", False),
                             )
+                            metadata_by_fp[fp] = {
+                                "fingerprint": fp,
+                                "alias": old_meta.get("alias", ""),
+                                "notes": old_meta.get("notes", ""),
+                                "room": old_meta.get("room", ""),
+                                "trusted": bool(old_meta.get("trusted", False)),
+                                "updated_at": stamp,
+                            }
                             device.update(
                                 {
                                     "alias": old_meta.get("alias", ""),
@@ -445,18 +503,19 @@ class NetworkHistory:
         }
 
     def latest_devices(self) -> List[Dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             rows = self._latest_snapshot_rows(conn)
-        devices = []
+            metadata_by_fp = self._metadata_map(conn)
+        devices: List[Dict[str, Any]] = []
         for row in rows:
-            device = self.apply_metadata(self._row_device(row))
+            device = self._apply_metadata_from_map(self._row_device(row), metadata_by_fp)
             device["historical"] = True
             devices.append(device)
         return devices
 
     def list_scans(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             rows = conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         result = []
         for row in rows:
@@ -480,7 +539,7 @@ class NetworkHistory:
             params.append(int(since_scan_id))
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             rows = conn.execute(query, params).fetchall()
         result = []
         for row in rows:
@@ -492,12 +551,13 @@ class NetworkHistory:
         return result
 
     def get_scan(self, scan_id: int) -> Optional[Dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             scan = conn.execute("SELECT * FROM scans WHERE id = ?", (int(scan_id),)).fetchone()
             if not scan:
                 return None
             rows = conn.execute("SELECT * FROM snapshots WHERE scan_id = ?", (int(scan_id),)).fetchall()
             events = conn.execute("SELECT * FROM events WHERE scan_id = ? ORDER BY id", (int(scan_id),)).fetchall()
+            metadata_by_fp = self._metadata_map(conn)
         try:
             visibility = json.loads(scan["visibility_json"] or "{}")
         except ValueError:
@@ -512,7 +572,7 @@ class NetworkHistory:
         return {
             **dict(scan),
             "visibility": visibility,
-            "devices": [self.apply_metadata(self._row_device(row)) for row in rows],
+            "devices": [self._apply_metadata_from_map(self._row_device(row), metadata_by_fp) for row in rows],
             "events": parsed_events,
         }
 

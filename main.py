@@ -716,7 +716,7 @@ class DeviceDetailWindow(ctk.CTkToplevel):
             )
             btn_wol.grid(row=0, column=4, sticky="e")
         elif self.device.get("is_self"):
-            btn_mac_spoof = ctk.CTkButton(
+            btn_mac_privacy = ctk.CTkButton(
                 row1,
                 text="🎭 Đổi Danh Tính MAC",
                 width=150,
@@ -726,7 +726,7 @@ class DeviceDetailWindow(ctk.CTkToplevel):
                 hover_color="#059669",
                 command=lambda: MacRandomizerWindow(self.winfo_toplevel()),
             )
-            btn_mac_spoof.grid(row=0, column=3, padx=(0, 4), sticky="e")
+            btn_mac_privacy.grid(row=0, column=3, padx=(0, 4), sticky="e")
 
         # Hàng 2: Ô nhập dải cổng tùy chỉnh (Custom Port Range Input)
         self.custom_row = ctk.CTkFrame(scan_cfg_box, fg_color="transparent")
@@ -1376,6 +1376,8 @@ class DeviceRow(ctk.CTkFrame):
             desc += f" • Discovery: {discovery_text}"
         if hostname_source:
             desc += f" • Tên từ {hostname_source}"
+        elif self.device.get("dhcp_hostname"):
+            desc += f" • DHCP: {self.device.get('dhcp_hostname')}"
         lbl_vendor = ctk.CTkLabel(
             info_frame,
             text=desc,
@@ -1922,8 +1924,9 @@ class WifiScannerApp(ctk.CTk):
         self.btn_history.grid(row=0, column=7, sticky="e")
 
         # 3. Thanh tùy chỉnh dải mạng quét Subnet Mask / CIDR
-        self.subnet_frame = ctk.CTkFrame(self.tab_scan, fg_color=("#E5E7EB", "#1F2937"), corner_radius=6, height=36)
+        self.subnet_frame = ctk.CTkFrame(self.tab_scan, fg_color=("#E5E7EB", "#1F2937"), corner_radius=6, height=70)
         self.subnet_frame.grid(row=2, column=0, padx=5, pady=(2, 4), sticky="ew")
+        self.subnet_frame.grid_columnconfigure(3, weight=1)
         self.subnet_frame.grid_columnconfigure(4, weight=1)
 
         lbl_sub_icon = ctk.CTkLabel(
@@ -1982,7 +1985,7 @@ class WifiScannerApp(ctk.CTk):
             hover_color=("#D1D5DB", "#4B5563"),
             command=self._open_adapter_selector,
         )
-        self.btn_adapters.grid(row=0, column=5, padx=(0, 8), pady=4, sticky="e")
+        self.btn_adapters.grid(row=1, column=0, padx=(12, 8), pady=(0, 4), sticky="w")
 
         self.room_filter_combobox = ctk.CTkOptionMenu(
             self.subnet_frame,
@@ -1993,7 +1996,7 @@ class WifiScannerApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
         )
         self.room_filter_combobox.set("Mọi phòng")
-        self.room_filter_combobox.grid(row=0, column=6, padx=(0, 8), pady=4, sticky="e")
+        self.room_filter_combobox.grid(row=1, column=1, padx=(0, 8), pady=(0, 4), sticky="w")
 
         self.retry_menu = ctk.CTkOptionMenu(
             self.subnet_frame,
@@ -2003,7 +2006,7 @@ class WifiScannerApp(ctk.CTk):
             font=ctk.CTkFont(size=10),
         )
         self.retry_menu.set("Retry 2")
-        self.retry_menu.grid(row=1, column=0, padx=(12, 4), pady=(0, 4), sticky="w")
+        self.retry_menu.grid(row=1, column=2, padx=(0, 4), pady=(0, 4), sticky="w")
         self.rate_menu = ctk.CTkOptionMenu(
             self.subnet_frame,
             values=["Rate 0 ms", "Rate 2 ms", "Rate 10 ms", "Rate 25 ms"],
@@ -2012,8 +2015,13 @@ class WifiScannerApp(ctk.CTk):
             font=ctk.CTkFont(size=10),
         )
         self.rate_menu.set("Rate 2 ms")
-        self.rate_menu.grid(row=1, column=1, padx=(0, 4), pady=(0, 4), sticky="w")
-        ctk.CTkLabel(self.subnet_frame, text="retry / rate-limit", font=ctk.CTkFont(size=10), text_color=("#6B7280", "#94A3B8")).grid(row=1, column=2, columnspan=2, padx=4, pady=(0, 4), sticky="w")
+        self.rate_menu.grid(row=1, column=3, padx=(0, 4), pady=(0, 4), sticky="w")
+        ctk.CTkLabel(
+            self.subnet_frame,
+            text="retry / rate-limit",
+            font=ctk.CTkFont(size=10),
+            text_color=("#6B7280", "#94A3B8"),
+        ).grid(row=1, column=4, padx=4, pady=(0, 4), sticky="w")
 
         # 4. Thanh tiến trình quét
         self.progress_bar = ctk.CTkProgressBar(self.tab_scan, height=5)
@@ -2565,7 +2573,7 @@ class WifiScannerApp(ctk.CTk):
         WakeOnLanWindow(self)
 
     def _open_mac_randomizer_window(self):
-        """Mở cửa sổ Trình Đổi Danh Tính Card Mạng (MAC Address Randomizer / Spoofing)."""
+        """Mở cửa sổ quản lý MAC riêng tư cho adapter do người dùng quản lý."""
         MacRandomizerWindow(self)
 
     def _on_scan_mode_changed(self, choice: str):
@@ -2714,6 +2722,7 @@ class WifiScannerApp(ctk.CTk):
             configured_rate_limit = float(str(self.rate_menu.get()).split()[-2])
         except (AttributeError, ValueError, IndexError):
             configured_rate_limit = 0.0
+        selected_adapter_indices = {str(index) for index in (self.scan_adapter_indices or [])}
 
         # Bắt đầu quét trên luồng riêng biệt
         def scan_worker():
@@ -2739,8 +2748,14 @@ class WifiScannerApp(ctk.CTk):
                     max_hosts=max_hosts,
                     include_ipv6=False,
                     scan_mode=self._active_scan_mode,
-                    adapter_configs=getattr(self.scanner, "adapters", []),
+                    # Let the scanner use the freshly refreshed adapter list;
+                    # selected indexes are retained on the scanner instance.
+                    adapter_configs=None,
                 )
+
+                if self.scanner.should_stop:
+                    self.device_queue.put(("cancelled", {"devices": devices}))
+                    return
 
                 # Discovery protocols bổ sung thông tin nhưng không thay thế
                 # kết quả ARP; mọi trường hợp đều được gắn độ tin cậy.
@@ -2751,18 +2766,50 @@ class WifiScannerApp(ctk.CTk):
                         ssdp_results=raw_discovery.get("ssdp"),
                         mdns_results=raw_discovery.get("mdns"),
                         ipv6_neighbors=raw_discovery.get("ipv6"),
+                        dhcp_hostnames=raw_discovery.get("dhcp"),
                     )
                 except Exception as discovery_error:
-                    raw_discovery = {"ssdp": [], "mdns": [], "ipv6": [], "error": str(discovery_error)}
+                    raw_discovery = {"ssdp": [], "mdns": [], "ipv6": [], "dhcp": {}, "error": str(discovery_error)}
 
-                try:
-                    expected = max(0, ipaddress.IPv4Network(target_cidr, strict=False).num_addresses - 2)
-                except Exception:
-                    expected = len(devices)
+                if auto_subnet:
+                    # Mirror the scanner's bounded /24 fallback for broad
+                    # adapter prefixes so visibility ratios are meaningful.
+                    expected_networks = {}
+                    active_configs = list(getattr(self.scanner, "adapters", []) or [])
+                    if selected_adapter_indices:
+                        active_configs = [
+                            config for config in active_configs
+                            if str(config.get("index", config.get("interface_index"))) in selected_adapter_indices
+                        ]
+                    for config in active_configs:
+                        for address in config.get("ipv4", []) or []:
+                            try:
+                                if isinstance(address, dict):
+                                    ip_value = address.get("IPv4Address") or address.get("IPAddress") or ""
+                                    prefix = address.get("PrefixLength")
+                                else:
+                                    parts = str(address).split("/", 1)
+                                    ip_value = parts[0]
+                                    prefix = parts[1] if len(parts) > 1 else None
+                                network = ipaddress.IPv4Network(f"{ip_value}/{prefix or self.scanner.subnet_mask}", strict=False)
+                                if network.num_addresses > 1024:
+                                    network = ipaddress.IPv4Network(f"{ip_value}/24", strict=False)
+                                expected_networks[network.with_prefixlen] = network
+                            except (TypeError, ValueError):
+                                continue
+                    expected = min(
+                        max_hosts,
+                        sum(max(0, int(network.num_addresses) - 2) for network in expected_networks.values()),
+                    ) if expected_networks else len(devices)
+                else:
+                    try:
+                        expected = max(0, ipaddress.IPv4Network(target_cidr, strict=False).num_addresses - 2)
+                    except Exception:
+                        expected = len(devices)
                 visibility = assess_visibility(
                     expected_hosts=expected,
                     devices=devices,
-                    gateway_reachable=any(d.get("is_gateway") for d in devices) or bool(self.scanner.gateway_ip),
+                    gateway_reachable=any(d.get("is_gateway") for d in devices),
                     adapter_count=len(self.scan_adapter_indices or getattr(self.scanner, "adapters", []) or [1]),
                 )
                 changes = self.history.record_scan(
@@ -2772,9 +2819,8 @@ class WifiScannerApp(ctk.CTk):
                     adapters=getattr(self.scanner, "adapters", []),
                     visibility=visibility,
                 ) if self.history is not None else {"new": [], "removed": [], "changed": [], "events": []}
-                for device in devices:
-                    if self.history is not None:
-                        device.update(self.history.apply_metadata(device))
+                if self.history is not None:
+                    devices = self.history.apply_metadata_many(devices)
                 self.device_queue.put(("completed", {"devices": devices, "changes": changes, "visibility": visibility, "discovery": raw_discovery}))
             except Exception as exc:
                 self.device_queue.put(("error", str(exc)))
@@ -2795,6 +2841,7 @@ class WifiScannerApp(ctk.CTk):
             new_devices = []
             is_completed = False
             completed_payload = None
+            cancelled_payload = None
             scan_error = None
 
             # Xử lý tối đa 40 item mỗi đợt để luôn nhường tài nguyên cho Windows xử lý click chuột/chuyển tab
@@ -2813,6 +2860,8 @@ class WifiScannerApp(ctk.CTk):
                     completed_payload = data
                 elif msg_type == "error":
                     scan_error = data
+                elif msg_type == "cancelled":
+                    cancelled_payload = data
 
             if scan_error:
                 self.is_scanning = False
@@ -2825,9 +2874,9 @@ class WifiScannerApp(ctk.CTk):
                 if hasattr(self, "lbl_empty_state") and self.lbl_empty_state.winfo_exists():
                     self.lbl_empty_state.grid_forget()
 
+                if self.history is not None:
+                    new_devices = self.history.apply_metadata_many(new_devices)
                 for dev in new_devices:
-                    if self.history is not None:
-                        dev.update(self.history.apply_metadata(dev))
                     self._live_devices.append(dev)
                     if self._active_scan_mode != "new-only" and self._matches_filter(dev):
                         row = DeviceRow(
@@ -2849,8 +2898,24 @@ class WifiScannerApp(ctk.CTk):
                     text=f"Đang quét IP: {current}/{total} • Đã tìm thấy {len(self.all_devices)} thiết bị đang online"
                 )
 
-            # 3. Khi quét hoàn tất
-            if is_completed:
+            # 3. Dừng giữa chừng: giữ kết quả tạm nhưng không ghi snapshot/diff.
+            if cancelled_payload is not None:
+                partial_devices = list((cancelled_payload or {}).get("devices") or self.all_devices)
+                if self.history is not None:
+                    partial_devices = self.history.apply_metadata_many(partial_devices)
+                self.all_devices = partial_devices
+                self._new_only_devices = partial_devices
+                self.is_scanning = False
+                self.btn_scan.configure(state="normal", text="🚀 Bắt đầu quét mạng")
+                self.btn_stop.configure(state="disabled")
+                self.lbl_status.configure(text=f"⏹ Đã dừng quét. Hiển thị {len(self.all_devices)} kết quả tạm; snapshot lịch sử không được cập nhật.")
+                self._refresh_room_filter_values()
+                self._apply_filter()
+                if hasattr(self, "topology_view"):
+                    self.topology_view.update_devices(self.all_devices, auto_layout=True)
+
+            # 4. Khi quét hoàn tất
+            elif is_completed:
                 if isinstance(completed_payload, dict):
                     final_devices = list(completed_payload.get("devices") or [])
                     self.last_scan_result = dict(completed_payload)
@@ -3192,7 +3257,7 @@ class WifiScannerApp(ctk.CTk):
             dns_info = audit_dns_security()
 
             # 4. Kiểm tra dịch vụ trên gateway và một số peer đã phát hiện.
-            dashboard = run_security_dashboard(gateway_ip, self.all_devices[:8], timeout=0.45)
+            dashboard = run_security_dashboard(gateway_ip, self.all_devices[:8], timeout=0.45, dns_info=dns_info)
 
             # 5. Tính toán điểm số & đánh giá
             eval_res = evaluate_security_audit(wifi_info, router_ports, dns_info, dashboard)
@@ -3218,7 +3283,7 @@ class WifiScannerApp(ctk.CTk):
         summary_txt = f"Mạng Wi-Fi ({wifi_info.get('ssid')}) sử dụng xác thực {wifi_info.get('auth')} ({wifi_info.get('cipher')}). "
         open_ports_count = sum(1 for p in router_ports if p["is_open"])
         risky_count = sum(1 for p in router_ports if p["is_open"] and p["risk"] in ("critical", "high"))
-        service_risk_count = sum(1 for f in (dashboard or {}).get("findings", []) if f.get("risk") in ("critical", "high", "medium") and f.get("status") in ("open", "endpoint_reachable", "ssdp_response"))
+        service_risk_count = sum(1 for f in (dashboard or {}).get("findings", []) if f.get("risk") in ("critical", "high", "medium") and f.get("status") in ("open", "endpoint_reachable", "ssdp_response", "guest_confirmed"))
         if risky_count > 0 or service_risk_count > 0:
             summary_txt += f"⚠️ Có {risky_count + service_risk_count} quan sát dịch vụ cần kiểm tra (kèm bằng chứng/banners bên dưới)."
         else:
@@ -3379,6 +3444,16 @@ class WifiScannerApp(ctk.CTk):
                 justify="left",
             )
             lbl_desc.grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 6), sticky="w")
+            if is_open and p.get("recommendation"):
+                ctk.CTkLabel(
+                    p_box,
+                    text=f"Khắc phục: {p.get('recommendation')}",
+                    font=ctk.CTkFont(size=10),
+                    text_color=("#92400E", "#FCD34D") if risk in ("critical", "high", "medium") else ("#4B5563", "#CBD5E1"),
+                    anchor="w",
+                    wraplength=380,
+                    justify="left",
+                ).grid(row=2, column=0, columnspan=2, padx=8, pady=(0, 7), sticky="w")
 
     def _render_audit_card_dns(self, master, dns_info: dict):
         """Vẽ thẻ 3: Máy chủ DNS & Chống giả mạo."""
@@ -3392,8 +3467,8 @@ class WifiScannerApp(ctk.CTk):
         box.pack(padx=14, pady=(0, 10), fill="x")
 
         dns_list = ", ".join(dns_info.get("dns_servers", []))
-        primary = dns_info.get("primary_dns", "")
-        pname = dns_info.get("provider_name", "")
+        primary = dns_info.get("primary_dns", "") or "Chưa xác định"
+        pname = dns_info.get("provider_name", "") or "Không xác định"
 
         row1 = ctk.CTkFrame(box, fg_color="transparent")
         row1.pack(padx=10, pady=(8, 2), fill="x")
@@ -3416,7 +3491,19 @@ class WifiScannerApp(ctk.CTk):
         row3 = ctk.CTkFrame(box, fg_color="transparent")
         row3.pack(padx=10, pady=(2, 8), fill="x")
         ctk.CTkLabel(row3, text="Đánh giá toàn vẹn:", font=ctk.CTkFont(size=12, weight="bold"), width=160, anchor="w").pack(side="left")
-        ctk.CTkLabel(row3, text="Tên miền được phân giải chính xác đến máy chủ gốc, không có dấu hiệu bị can thiệp.", font=ctk.CTkFont(size=11), text_color=("#4B5563", "#94A3B8")).pack(side="left")
+        ctk.CTkLabel(row3, text=("Tên miền được phân giải thành công; đây là bằng chứng quan sát, không phải bảo đảm tuyệt đối." if dns_info.get("canary_test_ok") else "Chưa phân giải được tên miền thử nghiệm; cần kiểm tra cấu hình DNS."), font=ctk.CTkFont(size=11), text_color=("#4B5563", "#94A3B8"), wraplength=620, justify="left").pack(side="left")
+        ipv6_servers = ", ".join(dns_info.get("dns_servers_v6", []))
+        if ipv6_servers:
+            row4 = ctk.CTkFrame(box, fg_color="transparent")
+            row4.pack(padx=10, pady=(0, 2), fill="x")
+            ctk.CTkLabel(row4, text="DNS IPv6:", font=ctk.CTkFont(size=12, weight="bold"), width=160, anchor="w").pack(side="left")
+            ctk.CTkLabel(row4, text=ipv6_servers, font=ctk.CTkFont(family="Consolas", size=10), text_color="#0284C7", anchor="w", wraplength=620).pack(side="left")
+        evidence = "; ".join(dns_info.get("evidence", []))
+        if evidence:
+            ctk.CTkLabel(box, text=f"Bằng chứng: {evidence}", font=ctk.CTkFont(size=10), text_color=("#4B5563", "#CBD5E1"), wraplength=760, justify="left", anchor="w").pack(padx=10, pady=(0, 4), anchor="w")
+        remediation = "; ".join(dns_info.get("remediation", []))
+        if remediation:
+            ctk.CTkLabel(box, text=f"Khắc phục: {remediation}", font=ctk.CTkFont(size=10), text_color=("#92400E", "#FCD34D"), wraplength=760, justify="left", anchor="w").pack(padx=10, pady=(0, 8), anchor="w")
 
     def _render_audit_card_dashboard(self, master, dashboard: dict):
         """Vẽ findings dịch vụ với bằng chứng, độ tin cậy và hướng khắc phục."""
@@ -3540,7 +3627,7 @@ class WifiScannerApp(ctk.CTk):
 
         self.lbl_spy_banner_title = ctk.CTkLabel(
             self.spy_status_card,
-            text="CHẾ ĐỘ RÀ SOÁT BẢO VỆ RIÊNG TƯ — PHÒNG KHÁCH SẠN / PHÒNG NGỦ",
+            text="CHẾ ĐỘ RÀ SOÁT BẢO VỆ RIÊNG TƯ — KHU VỰC NHẠY CẢM",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=("#991B1B", "#FCA5A5"),
             anchor="w",

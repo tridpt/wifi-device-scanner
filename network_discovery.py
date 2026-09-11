@@ -44,8 +44,6 @@ def _run_powershell(command: str, timeout: float = 2.5) -> str:
                 "-NoLogo",
                 "-NoProfile",
                 "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
                 "-Command",
                 command,
             ],
@@ -166,6 +164,43 @@ def _parse_ssdp_response(raw: bytes) -> Dict[str, str]:
     return result
 
 
+def _interface_ipv4(interface: str) -> str:
+    """Resolve an IPv4 literal or an adapter name to a multicast interface."""
+    value = str(interface or "").strip()
+    if not value:
+        return "0.0.0.0"
+    try:
+        socket.inet_aton(value)
+        return value
+    except OSError:
+        pass
+
+    # The caller normally passes an address, but accepting the adapter label
+    # makes the helper usable directly from the multi-adapter UI as well.
+    folded = value.casefold()
+    for adapter in get_network_adapters():
+        if folded not in {
+            str(adapter.get("name") or "").casefold(),
+            str(adapter.get("index") or "").casefold(),
+        }:
+            continue
+        for raw_address in adapter.get("ipv4") or []:
+            if isinstance(raw_address, dict):
+                candidate = raw_address.get("IPAddress") or raw_address.get("IPv4Address") or ""
+            else:
+                candidate = str(raw_address).split("/", 1)[0]
+            try:
+                socket.inet_aton(str(candidate))
+                return str(candidate)
+            except OSError:
+                continue
+
+    try:
+        return socket.gethostbyname(value)
+    except OSError:
+        return "0.0.0.0"
+
+
 def discover_ssdp(timeout: float = 0.8, mx: int = 1, interface: str = "") -> List[Dict[str, Any]]:
     """Discover UPnP devices with a bounded SSDP M-SEARCH request."""
     message = (
@@ -179,9 +214,14 @@ def discover_ssdp(timeout: float = 0.8, mx: int = 1, interface: str = "") -> Lis
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
         sock.settimeout(max(0.1, min(float(timeout), 5.0)))
-        if interface:
+        interface_ip = _interface_ipv4(interface)
+        if interface_ip != "0.0.0.0":
             try:
-                sock.bind((interface, 0))
+                sock.bind((interface_ip, 0))
+            except OSError:
+                pass
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface_ip))
             except OSError:
                 pass
         sock.sendto(message, ("239.255.255.250", 1900))
@@ -221,37 +261,52 @@ def _dns_name(labels: Sequence[str]) -> bytes:
     return b"".join(bytes([len(label)]) + label.encode("idna") for label in labels) + b"\x00"
 
 
-def _build_dns_query(name: str, qtype: int = 12, ident: int = 0x4D44) -> bytes:
+def _build_dns_query(name: str, qtype: int = 12, ident: int = 0, unicast_response: bool = False) -> bytes:
+    """Build an mDNS question, optionally requesting a unicast response."""
     labels = [part for part in name.rstrip(".").split(".") if part]
-    return struct.pack("!HHHHHH", ident, 0x0100, 1, 0, 0, 0) + _dns_name(labels) + struct.pack("!HH", qtype, 1)
+    query_class = 1 | (0x8000 if unicast_response else 0)
+    # mDNS queries are multicast DNS messages, not recursive DNS requests.
+    return struct.pack("!HHHHHH", ident, 0, 1, 0, 0, 0) + _dns_name(labels) + struct.pack("!HH", qtype, query_class)
 
 
 def _read_dns_name(data: bytes, offset: int) -> Tuple[str, int]:
+    """Read a DNS name safely, including compressed labels from untrusted UDP."""
     labels: List[str] = []
+    position = offset
+    next_offset = offset
+    jumped = False
     seen = set()
-    while offset < len(data):
-        length = data[offset]
+
+    # A normal DNS name has at most 127 labels.  The cap also prevents a
+    # malformed compression-pointer cycle from consuming the scan worker.
+    for _ in range(128):
+        if position >= len(data):
+            break
+        length = data[position]
         if length == 0:
-            offset += 1
+            if not jumped:
+                next_offset = position + 1
             break
         if length & 0xC0 == 0xC0:
-            if offset + 1 >= len(data):
+            if position + 1 >= len(data):
                 break
-            pointer = ((length & 0x3F) << 8) | data[offset + 1]
-            if pointer in seen:
+            pointer = ((length & 0x3F) << 8) | data[position + 1]
+            if pointer >= len(data) or pointer in seen:
                 break
             seen.add(pointer)
-            part, _ = _read_dns_name(data, pointer)
-            if part:
-                labels.append(part)
-            offset += 2
+            if not jumped:
+                next_offset = position + 2
+            position = pointer
+            jumped = True
+            continue
+        if length & 0xC0 or length > 63 or position + 1 + length > len(data):
             break
-        if length > 63 or offset + 1 + length > len(data):
-            break
-        offset += 1
-        labels.append(data[offset : offset + length].decode("utf-8", errors="replace"))
-        offset += length
-    return ".".join(labels), offset
+        position += 1
+        labels.append(data[position : position + length].decode("utf-8", errors="replace"))
+        position += length
+        if not jumped:
+            next_offset = position
+    return ".".join(labels), next_offset
 
 
 def _parse_dns_answers(data: bytes) -> List[Dict[str, Any]]:
@@ -312,14 +367,22 @@ def discover_mdns(timeout: float = 0.8, interface: str = "") -> List[Dict[str, A
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
         # Join the link-local multicast group so replies are received even
         # when another mDNS listener is already active on the host.
-        interface_ip = "0.0.0.0"
-        if interface:
-            try:
-                interface_ip = socket.gethostbyname(interface)
-            except OSError:
-                interface_ip = str(interface)
+        interface_ip = _interface_ipv4(interface)
+        bind_address = interface_ip if interface_ip != "0.0.0.0" else ""
+        try:
+            # Binding to 5353 receives normal multicast mDNS answers.  If a
+            # resident resolver owns the port, retain an ephemeral fallback
+            # and request unicast replies below.
+            sock.bind((bind_address, 5353))
+        except OSError:
+            sock.bind((bind_address, 0))
         try:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton("224.0.0.251") + socket.inet_aton(interface_ip))
         except OSError:
@@ -331,13 +394,11 @@ def discover_mdns(timeout: float = 0.8, interface: str = "") -> List[Dict[str, A
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface_ip))
         except OSError:
             pass
-        if interface:
-            try:
-                sock.bind((interface, 0))
-            except OSError:
-                pass
-        for index, query_name in enumerate(query_names, 1):
-            sock.sendto(_build_dns_query(query_name, qtype=12, ident=0x4D44 + index), ("224.0.0.251", 5353))
+        for query_name in query_names:
+            sock.sendto(
+                _build_dns_query(query_name, qtype=12, ident=0, unicast_response=True),
+                ("224.0.0.251", 5353),
+            )
         deadline = time.monotonic() + max(0.1, min(float(timeout), 5.0))
         seen = set()
         while time.monotonic() < deadline:
@@ -458,6 +519,40 @@ def resolve_hostname_sources(ip: str, timeout: float = 0.35, include_dhcp: bool 
     return {"hostname": "", "source": "unavailable"}
 
 
+def get_dhcp_hostname_records(timeout: float = 1.5) -> Dict[str, Dict[str, str]]:
+    """Read DHCP lease hostnames only when this PC administers a DHCP server.
+
+    A normal Windows client cannot read leases from a home router, so an empty
+    mapping means *unavailable*, not that a device has no DHCP hostname. This
+    one-shot query is deliberately run once per discovery cycle rather than
+    once per device.
+    """
+    if os.name != "nt":
+        return {}
+    raw = _run_powershell(
+        "if (Get-Command Get-DhcpServerv4Lease -ErrorAction SilentlyContinue) { "
+        "Get-DhcpServerv4Lease -AllLeases -ErrorAction SilentlyContinue | "
+        "Select-Object IPAddress,HostName,ClientId,AddressState | ConvertTo-Json -Compress }",
+        timeout=max(0.2, min(float(timeout), 8.0)),
+    )
+    records: Dict[str, Dict[str, str]] = {}
+    try:
+        for row in _as_list(json.loads(raw) if raw.strip() else []):
+            if not isinstance(row, dict):
+                continue
+            ip = str(row.get("IPAddress") or "").strip()
+            hostname = str(row.get("HostName") or "").strip().rstrip(".")
+            if ip and hostname:
+                records[ip] = {
+                    "hostname": hostname,
+                    "client_id": str(row.get("ClientId") or ""),
+                    "state": str(row.get("AddressState") or ""),
+                }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return records
+
+
 def _confidence_label(value: float) -> str:
     if value >= 0.8:
         return "cao"
@@ -488,18 +583,46 @@ def enrich_devices(
     ssdp_results: Optional[Iterable[Dict[str, Any]]] = None,
     mdns_results: Optional[Iterable[Dict[str, Any]]] = None,
     ipv6_neighbors: Optional[Iterable[Dict[str, Any]]] = None,
+    dhcp_hostnames: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Merge discovery evidence into ARP device dictionaries."""
     result = [dict(d) for d in devices if isinstance(d, dict)]
     by_ip = {str(d.get("ip", "")).lower(): d for d in result if d.get("ip")}
     by_mac = {re.sub(r"[^0-9a-f]", "", str(d.get("mac", "")).lower()): d for d in result if d.get("mac")}
+    for device in result:
+        lease = (dhcp_hostnames or {}).get(str(device.get("ip") or ""))
+        if not lease:
+            continue
+        hostname = str(lease.get("hostname") or "").strip()
+        if not hostname:
+            continue
+        device["dhcp_hostname"] = hostname
+        device["dhcp_lease_state"] = lease.get("state", "")
+        if device.get("name") in (None, "", "—"):
+            device["name"] = hostname
+            device["hostname_source"] = "dhcp-lease"
     for neighbor in ipv6_neighbors or []:
         mac_key = re.sub(r"[^0-9a-f]", "", str(neighbor.get("mac", "")).lower())
         d = by_mac.get(mac_key) if mac_key else None
         if d is None:
             d = by_ip.get(str(neighbor.get("ip", "")).lower())
         if d is None:
-            d = {"ip": "", "ipv6": neighbor.get("ip", ""), "mac": neighbor.get("mac", ""), "name": "—", "vendor": "Chưa rõ", "category": "unknown"}
+            vendor, hint, category = "Chưa rõ", "", "unknown"
+            try:
+                from oui_db import lookup_vendor
+
+                vendor, hint, category = lookup_vendor(neighbor.get("mac", ""))
+            except Exception:
+                pass
+            d = {
+                "ip": "",
+                "ipv6": neighbor.get("ip", ""),
+                "mac": neighbor.get("mac", ""),
+                "name": "—",
+                "vendor": vendor,
+                "hint": hint,
+                "category": category,
+            }
             result.append(d)
             if mac_key:
                 by_mac[mac_key] = d
@@ -543,7 +666,7 @@ def assess_visibility(
     *,
     expected_hosts: Optional[int],
     devices: Iterable[Dict[str, Any]],
-    gateway_reachable: bool = True,
+    gateway_reachable: bool = False,
     adapter_count: int = 1,
 ) -> Dict[str, Any]:
     """Describe likely AP isolation/VLAN limitations without overclaiming."""
@@ -587,7 +710,8 @@ def run_local_discovery(timeout: float = 0.8, interface: str = "") -> Dict[str, 
     ssdp = discover_ssdp(timeout=timeout, interface=interface)
     mdns = discover_mdns(timeout=timeout, interface=interface)
     ipv6 = get_ipv6_neighbors()
-    return {"ssdp": ssdp, "mdns": mdns, "ipv6": ipv6, "timestamp": time.time()}
+    dhcp = get_dhcp_hostname_records(timeout=max(0.4, timeout))
+    return {"ssdp": ssdp, "mdns": mdns, "ipv6": ipv6, "dhcp": dhcp, "timestamp": time.time()}
 
 
 # Readable aliases for integrations that prefer a scan_* naming convention.
@@ -603,6 +727,7 @@ __all__ = [
     "discover_mdns",
     "get_ipv6_neighbors",
     "resolve_hostname_sources",
+    "get_dhcp_hostname_records",
     "enrich_devices",
     "calculate_confidence",
     "assess_visibility",

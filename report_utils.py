@@ -92,7 +92,7 @@ h1 {{ margin:0 0 6px; font-size:29px; }} h2 {{ margin:26px 0 10px; font-size:19p
 <div class=metric><span>Cảnh báo dịch vụ</span><b>{len([x for x in findings if x.get('risk') not in ('safe','low')])}</b></div>
 <div class=metric><span>Độ phủ quan sát</span><b>{_esc(visibility.get('status') or '—')}</b></div>
 </section>
-<h2>Thiết bị trong snapshot</h2><div class=panel><table><thead><tr><th>#</th><th>Tên</th><th>IPv4</th><th>IPv6</th><th>MAC</th><th>Hãng</th><th>Loại</th><th>Phòng</th><th>Tin cậy</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan=9>Không có dữ liệu</td></tr>'}</tbody></table></div>
+<h2>Thiết bị trong snapshot</h2><div class=panel><table><thead><tr><th>#</th><th>Tên</th><th>IPv4</th><th>IPv6</th><th>MAC</th><th>Hãng</th><th>Loại</th><th>Phòng</th><th>Độ tin cậy</th><th>Tin cậy</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan=10>Không có dữ liệu</td></tr>'}</tbody></table></div>
 <h2>Lịch sử và cảnh báo</h2><div class=panel><table><thead><tr><th>Loại</th><th>Thiết bị</th><th>IP</th><th>MAC</th></tr></thead><tbody>{''.join(event_rows) or '<tr><td colspan=4>Không có thay đổi trong lần này</td></tr>'}</tbody></table></div>
 <h2>Security dashboard</h2><div class=notice>DNS chính: <b>{_esc(dns.get('primary_dns') or '—')}</b> • Canary: <b>{'OK' if dns.get('canary_test_ok') else 'Không xác minh được'}</b>. Cổng mở hoặc banner là bằng chứng quan sát, không phải kết luận tuyệt đối.</div>
 <div class=panel style="margin-top:10px"><table><thead><tr><th>Rủi ro</th><th>Kiểm tra</th><th>Host/port</th><th>Trạng thái</th><th>Bằng chứng</th><th>Khắc phục</th></tr></thead><tbody>{''.join(finding_rows) or '<tr><td colspan=6>Chưa có finding</td></tr>'}</tbody></table></div>
@@ -158,10 +158,12 @@ def export_report_pdf(
         story.append(Paragraph("Thiết bị", styles["Section"]))
         cell_style = ParagraphStyle(name="Cell", parent=styles["Normal"], fontName=font_name, fontSize=7, leading=8)
         head_style = ParagraphStyle(name="HeadCell", parent=cell_style, textColor=colors.white, fontName=font_name)
-        data = [[Paragraph(_esc(x), head_style) for x in ["Tên", "IPv4", "IPv6", "MAC", "Hãng", "Loại", "Phòng", "Tin cậy"]]]
+        data = [[Paragraph(_esc(x), head_style) for x in ["Tên", "IPv4", "IPv6", "MAC", "Hãng", "Loại", "Phòng", "Độ tin cậy", "Tin cậy"]]]
         for d in device_list:
-            data.append([Paragraph(_esc(value), cell_style) for value in [str(d.get("alias") or d.get("name") or "-"), str(d.get("ip") or ""), str(d.get("ipv6") or "-"), str(d.get("mac") or ""), str(d.get("vendor") or "Chưa rõ"), str(d.get("category") or "unknown"), str(d.get("room") or "-"), "Có" if d.get("trusted") else "Chưa"]])
-        table = Table(data, repeatRows=1, colWidths=[31 * mm, 24 * mm, 38 * mm, 34 * mm, 32 * mm, 22 * mm, 22 * mm, 18 * mm])
+            confidence = d.get("confidence")
+            confidence_text = f"{float(confidence) * 100:.0f}%" if isinstance(confidence, (int, float)) else "-"
+            data.append([Paragraph(_esc(value), cell_style) for value in [str(d.get("alias") or d.get("name") or "-"), str(d.get("ip") or ""), str(d.get("ipv6") or "-"), str(d.get("mac") or ""), str(d.get("vendor") or "Chưa rõ"), str(d.get("category") or "unknown"), str(d.get("room") or "-"), confidence_text, "Có" if d.get("trusted") else "Chưa"]])
+        table = Table(data, repeatRows=1, colWidths=[30 * mm, 23 * mm, 37 * mm, 33 * mm, 31 * mm, 21 * mm, 21 * mm, 22 * mm, 18 * mm])
         table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f766e")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTNAME", (0, 0), (-1, -1), font_name), ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#d9e0ea")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
         story += [table, Spacer(1, 8)]
         visibility = scan_result.get("visibility") or {}

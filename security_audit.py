@@ -13,10 +13,11 @@ import re
 import time
 import json
 import os
+import ipaddress
 import ssl
 import struct
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 # Danh mục các cổng nhạy cảm trên Router cần kiểm tra
 SENSITIVE_ROUTER_PORTS = [
@@ -250,6 +251,24 @@ def audit_dns_security() -> Dict[str, Any]:
     dns_servers = []
     dns_servers_v6 = []
     evidence = []
+    dns_source = "unavailable"
+
+    def add_dns_server(value: Any) -> None:
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return
+        # Windows can return a scoped IPv6 literal.  The scope is not needed
+        # for reporting, while ipaddress validates the address portion.
+        address_part = raw_value.split("%", 1)[0]
+        try:
+            parsed = ipaddress.ip_address(address_part)
+        except ValueError:
+            return
+        target = dns_servers_v6 if parsed.version == 6 else dns_servers
+        normalized = str(parsed)
+        if normalized not in target:
+            target.append(normalized)
+
     try:
         # PowerShell property names are stable across Windows display languages.
         if os.name == "nt":
@@ -268,14 +287,9 @@ def audit_dns_security() -> Dict[str, Any]:
             values = json.loads(raw) if raw.strip() else []
             values = values if isinstance(values, list) else [values]
             for value in values:
-                try:
-                    parsed = socket.getaddrinfo(str(value), None)[0][4][0]
-                    if ":" in parsed:
-                        dns_servers_v6.append(parsed)
-                    else:
-                        dns_servers.append(parsed)
-                except Exception:
-                    continue
+                add_dns_server(value)
+            if dns_servers or dns_servers_v6:
+                dns_source = "powershell"
         else:
             raise OSError("PowerShell unavailable")
     except Exception:
@@ -297,25 +311,28 @@ def audit_dns_security() -> Dict[str, Any]:
                 if not dns_context:
                     continue
                 for value in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", line):
-                    if value not in dns_servers:
-                        dns_servers.append(value)
+                    add_dns_server(value)
                 for value in re.findall(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])", line):
-                    if value not in dns_servers_v6:
-                        dns_servers_v6.append(value)
+                    add_dns_server(value)
+            if dns_servers or dns_servers_v6:
+                dns_source = "ipconfig"
         except Exception:
             pass
 
-    dns_servers = list(dict.fromkeys(dns_servers))
-    dns_servers_v6 = list(dict.fromkeys(dns_servers_v6))
-    if not dns_servers and not dns_servers_v6:
-        dns_servers = ["192.168.1.1"]
-
-    primary_dns = dns_servers[0] if dns_servers else (dns_servers_v6[0] if dns_servers_v6 else "192.168.1.1")
+    primary_dns = dns_servers[0] if dns_servers else (dns_servers_v6[0] if dns_servers_v6 else "")
     provider_name = KNOWN_SAFE_DNS.get(primary_dns, "")
     is_router_relay = False
-    if primary_dns.startswith("192.168.") or primary_dns.startswith("10.") or primary_dns.startswith("172."):
-        is_router_relay = True
-        provider_name = f"Modem / Router chuyển tiếp nội bộ ({primary_dns})"
+    if primary_dns:
+        try:
+            primary_address = ipaddress.ip_address(primary_dns)
+            if primary_address.is_private or primary_address.is_link_local:
+                is_router_relay = True
+                provider_name = f"Resolver nội bộ / router ({primary_dns})"
+        except ValueError:
+            pass
+    else:
+        provider_name = "Chưa lấy được DNS"
+        evidence.append("Không lấy được danh sách DNS từ Windows; không tự suy đoán gateway là DNS.")
 
     # Kiểm tra phân giải tên miền Canary (Chống DNS Hijacking)
     canary_test_ok = False
@@ -323,9 +340,9 @@ def audit_dns_security() -> Dict[str, Any]:
     resolved_ips = []
     try:
         t0 = time.perf_counter()
-        resolved_ips = socket.gethostbyname_ex("google.com")[2]
+        answers = socket.getaddrinfo("google.com", None, type=socket.SOCK_STREAM)
+        resolved_ips = list(dict.fromkeys(item[4][0] for item in answers if item and item[4]))
         canary_latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-        # Google IPs thường bắt đầu bằng 142.250., 172.217., 74.125., 216.58., v.v.
         if resolved_ips and len(resolved_ips) > 0:
             canary_test_ok = True
             evidence.append(f"google.com phân giải thành {', '.join(resolved_ips[:3])}")
@@ -338,22 +355,27 @@ def audit_dns_security() -> Dict[str, Any]:
     elif primary_dns:
         evidence.append(f"Resolver không nằm trong danh sách nhận diện: {primary_dns}")
 
+    if not (dns_servers or dns_servers_v6):
+        remediation = ["Kiểm tra lại quyền đọc cấu hình DNS hoặc xem cấu hình adapter; kết quả DNS hiện chưa đủ dữ liệu để kết luận."]
+    elif not canary_test_ok:
+        remediation = ["Kiểm tra cấu hình DNS và cân nhắc dùng 1.1.1.1, 9.9.9.9 hoặc DNS doanh nghiệp đáng tin cậy."]
+    else:
+        remediation = ["Giám sát DNS over HTTPS/TLS nếu cần giảm nguy cơ sửa đổi trên mạng không tin cậy."]
+
     return {
         "dns_servers": dns_servers,
         "dns_servers_v6": dns_servers_v6,
         "primary_dns": primary_dns,
         "provider_name": provider_name,
         "is_router_relay": is_router_relay,
+        "dns_source": dns_source,
+        "dns_configuration_available": bool(dns_servers or dns_servers_v6),
         "canary_test_ok": canary_test_ok,
         "canary_latency_ms": canary_latency_ms,
         "canary_ips": resolved_ips[:3],
         "evidence": evidence,
-        "confidence": 0.85 if canary_test_ok else 0.65,
-        "remediation": (
-            ["Kiểm tra cấu hình DNS và cân nhắc dùng 1.1.1.1, 9.9.9.9 hoặc DNS doanh nghiệp đáng tin cậy."]
-            if not canary_test_ok else
-            ["Giám sát DNS over HTTPS/TLS nếu cần giảm nguy cơ sửa đổi trên mạng không tin cậy."]
-        ),
+        "confidence": 0.85 if canary_test_ok else (0.65 if dns_servers or dns_servers_v6 else 0.35),
+        "remediation": remediation,
     }
 
 
@@ -440,7 +462,7 @@ def _smb2_negotiate_request() -> bytes:
 def _smb2_session_setup_anonymous_request() -> bytes:
     # Empty security buffer intentionally tests anonymous/guest policy only;
     # no username, password, or credential material is sent.
-    body = bytearray(25)
+    body = bytearray(24)
     struct.pack_into("<H", body, 0, 25)  # StructureSize
     body[2] = 0  # Flags
     body[3] = 0  # SecurityMode
@@ -485,6 +507,54 @@ def _smb_probe_raw(host: str, payload: bytes, timeout: float) -> Dict[str, Any]:
     return result
 
 
+def _recv_smb_frame(sock: socket.socket, max_length: int = 8192) -> bytes:
+    """Read one Direct-TCP SMB frame without assuming recv returns it whole."""
+    def receive_exact(size: int) -> bytes:
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    header = receive_exact(4)
+    if len(header) != 4:
+        return header
+    length = int.from_bytes(header[1:4], "big")
+    if length <= 0 or length > max_length:
+        return header
+    return header + receive_exact(length)
+
+
+def _smb_negotiate_then_empty_session(host: str, timeout: float) -> Dict[str, Any]:
+    """Keep SMB negotiate and session setup on one TCP connection."""
+    result: Dict[str, Any] = {"open": False, "negotiate": b"", "session": b"", "error": ""}
+    sock = None
+    try:
+        sock = socket.create_connection((host, 445), timeout=max(0.1, min(float(timeout), 3.0)))
+        sock.settimeout(max(0.1, min(float(timeout), 2.0)))
+        result["open"] = True
+        sock.sendall(_smb2_negotiate_request())
+        result["negotiate"] = _recv_smb_frame(sock)
+        # SMB state is connection-scoped.  Opening a second TCP connection
+        # here would make a SessionSetup response meaningless or rejected.
+        if result["negotiate"]:
+            sock.sendall(_smb2_session_setup_anonymous_request())
+            result["session"] = _recv_smb_frame(sock)
+    except Exception as exc:
+        result["error"] = str(exc)[:200]
+    finally:
+        try:
+            if sock:
+                sock.close()
+        except Exception:
+            pass
+    return result
+
+
 def check_smb_guest(host: str, timeout: float = 0.6) -> Dict[str, Any]:
     """Perform negotiate + empty-session probes without guessing credentials.
 
@@ -492,15 +562,15 @@ def check_smb_guest(host: str, timeout: float = 0.6) -> Dict[str, Any]:
     empty session and sets the SMB guest flag. A TCP-open or negotiate-only
     result remains ``unverified`` rather than being called guest access.
     """
-    negotiate = _smb_probe_raw(host, _smb2_negotiate_request(), timeout)
-    if not negotiate["open"]:
+    exchange = _smb_negotiate_then_empty_session(host, timeout)
+    if not exchange["open"]:
         return {
             "check": "smb_guest", "host": host, "status": "unreachable", "port_open": False,
-            "evidence": negotiate.get("error", "Không phản hồi TCP/445"), "response_excerpt": "",
+            "evidence": exchange.get("error", "Không phản hồi TCP/445"), "response_excerpt": "",
             "confidence": 0.85, "risk": "safe",
             "remediation": "Không quan sát được SMB trên cổng 445.",
         }
-    raw = negotiate.get("raw", b"")
+    raw = exchange.get("negotiate", b"")
     status_code = struct.unpack_from("<I", raw, 12)[0] if len(raw) >= 16 and raw[4:8] == b"\xfeSMB" else None
     if status_code not in (None, 0, 0x00000103):
         return {
@@ -509,8 +579,7 @@ def check_smb_guest(host: str, timeout: float = 0.6) -> Dict[str, Any]:
             "response_excerpt": raw[:256].hex(), "confidence": 0.8, "risk": "safe",
             "remediation": "Cập nhật/kiểm tra cấu hình SMB nếu thiết bị cần chia sẻ tệp.",
         }
-    session = _smb_probe_raw(host, _smb2_session_setup_anonymous_request(), timeout)
-    session_raw = session.get("raw", b"")
+    session_raw = exchange.get("session", b"")
     session_status = struct.unpack_from("<I", session_raw, 12)[0] if len(session_raw) >= 16 and session_raw[4:8] == b"\xfeSMB" else None
     guest_flag = False
     if session_status == 0 and len(session_raw) >= 72:
@@ -533,6 +602,8 @@ def check_smb_guest(host: str, timeout: float = 0.6) -> Dict[str, Any]:
         risk = "medium"
         confidence = 0.55
         evidence = "TCP/445 và SMB negotiate phản hồi nhưng chưa xác minh được guest/anonymous."
+        if exchange.get("error"):
+            evidence += f" SessionSetup: {exchange['error']}"
     return {
         "check": "smb_guest", "host": host, "status": status, "port_open": True,
         "evidence": evidence, "response_excerpt": session_raw[:512].hex(),
@@ -584,35 +655,54 @@ def check_http_admin(host: str, ports: tuple = (80, 8080, 443), timeout: float =
     return findings
 
 
-def check_upnp(host: str, timeout: float = 0.7) -> Dict[str, Any]:
+def check_upnp(
+    host: str,
+    timeout: float = 0.7,
+    ssdp_records: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Check for a UPnP control endpoint; an open port alone is only evidence."""
     probe = _safe_tcp_probe(host, 5000, timeout=timeout)
     ssdp_evidence = ""
     ssdp_seen = False
-    udp = None
-    try:
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        udp.settimeout(max(0.1, min(float(timeout), 2.0)))
-        request = (
-            "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
-            "MAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n"
-        ).encode("ascii")
-        udp.sendto(request, ("239.255.255.250", 1900))
-        deadline = time.monotonic() + max(0.1, min(float(timeout), 2.0))
-        while time.monotonic() < deadline:
-            raw, addr = udp.recvfrom(4096)
-            if addr and addr[0] == host:
-                ssdp_seen = True
-                ssdp_evidence = raw.decode("utf-8", errors="replace").split("\r\n", 1)[0][:200]
-                break
-    except Exception:
-        pass
-    finally:
+    if ssdp_records is not None:
+        for record in ssdp_records:
+            if str(record.get("ip") or "") != str(host):
+                continue
+            ssdp_seen = True
+            ssdp_evidence = (
+                str(record.get("status") or "")
+                or str(record.get("server") or "")
+                or str(record.get("st") or "")
+            )[:200]
+            break
+    else:
+        # Standalone callers still get a single bounded SSDP query.  The
+        # dashboard supplies shared records so it does not send one multicast
+        # request per device.
+        udp = None
         try:
-            if udp:
-                udp.close()
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            udp.settimeout(max(0.1, min(float(timeout), 2.0)))
+            request = (
+                "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+                "MAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n"
+            ).encode("ascii")
+            udp.sendto(request, ("239.255.255.250", 1900))
+            deadline = time.monotonic() + max(0.1, min(float(timeout), 2.0))
+            while time.monotonic() < deadline:
+                raw, addr = udp.recvfrom(4096)
+                if addr and addr[0] == host:
+                    ssdp_seen = True
+                    ssdp_evidence = raw.decode("utf-8", errors="replace").split("\r\n", 1)[0][:200]
+                    break
         except Exception:
             pass
+        finally:
+            try:
+                if udp:
+                    udp.close()
+            except Exception:
+                pass
     if ssdp_seen:
         status = "ssdp_response"
     elif probe["open"]:
@@ -630,7 +720,12 @@ def check_upnp(host: str, timeout: float = 0.7) -> Dict[str, Any]:
     }
 
 
-def run_security_dashboard(gateway_ip: str, devices: Optional[List[Dict[str, Any]]] = None, timeout: float = 0.7) -> Dict[str, Any]:
+def run_security_dashboard(
+    gateway_ip: str,
+    devices: Optional[List[Dict[str, Any]]] = None,
+    timeout: float = 0.7,
+    dns_info: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Run bounded defensive checks and return evidence-rich findings."""
     targets: List[Tuple[str, str]] = []
     if gateway_ip:
@@ -640,10 +735,21 @@ def run_security_dashboard(gateway_ip: str, devices: Optional[List[Dict[str, Any
         if ip and ip != str(gateway_ip) and len(targets) < 9:
             targets.append((ip, "device"))
     findings: List[Dict[str, Any]] = []
+    try:
+        from network_discovery import discover_ssdp
+
+        ssdp_records = discover_ssdp(timeout=min(max(float(timeout), 0.1), 1.5))
+    except Exception:
+        ssdp_records = []
+
     def inspect(target: Tuple[str, str]) -> List[Dict[str, Any]]:
         host, role = target
         local: List[Dict[str, Any]] = []
-        for item in (check_smb_guest(host, timeout), check_telnet(host, timeout), check_upnp(host, timeout)):
+        for item in (
+            check_smb_guest(host, timeout),
+            check_telnet(host, timeout),
+            check_upnp(host, timeout, ssdp_records=ssdp_records),
+        ):
             item["role"] = role
             local.append(item)
         for item in check_http_admin(host, timeout=timeout):
@@ -662,7 +768,8 @@ def run_security_dashboard(gateway_ip: str, devices: Optional[List[Dict[str, Any
         "generated_at": time.time(),
         "gateway_ip": gateway_ip,
         "findings": findings,
-        "dns": audit_dns_security(),
+        "ssdp_records": ssdp_records,
+        "dns": dns_info if dns_info is not None else audit_dns_security(),
         "summary": {
             "critical": sum(1 for f in findings if f.get("risk") == "critical"),
             "high": sum(1 for f in findings if f.get("risk") == "high"),
@@ -739,10 +846,17 @@ def evaluate_security_audit(wifi_info: dict, router_ports: list, dns_info: dict,
         deductions.append("Trang quản trị Modem chỉ hỗ trợ HTTP thông thường, chưa bật HTTPS (-5đ)")
 
     # 3. Đánh giá DNS và Toàn vẹn (Tối đa trừ 20 điểm)
-    if not dns_info.get("canary_test_ok"):
+    dns_config_known = bool(
+        dns_info.get("dns_configuration_available")
+        if "dns_configuration_available" in dns_info
+        else (dns_info.get("dns_servers") or dns_info.get("dns_servers_v6") or dns_info.get("primary_dns"))
+    )
+    if not dns_info.get("canary_test_ok") and dns_config_known:
         score -= 20
         deductions.append("Truy vấn thử nghiệm DNS thất bại hoặc bị chặn (-20đ)")
         recommendations.append("🚨 KIỂM TRA MÁY CHỦ DNS: Kiểm tra lại cấu hình DNS trong máy tính hoặc đổi sang Cloudflare 1.1.1.1 / Google 8.8.8.8.")
+    elif not dns_info.get("canary_test_ok"):
+        recommendations.append("ℹ️ CHƯA ĐỦ DỮ LIỆU DNS: Không lấy được danh sách resolver; hãy kiểm tra lại sau khi adapter hoạt động.")
     else:
         if dns_info.get("is_router_relay"):
             # Sử dụng DNS mặc định của nhà mạng qua router
@@ -751,10 +865,15 @@ def evaluate_security_audit(wifi_info: dict, router_ports: list, dns_info: dict,
     # 4. Các quan sát dịch vụ bổ sung.  Chỉ trừ điểm khi trạng thái mở/
     # reachable có bằng chứng; SMB guest chưa xác minh không bị coi là đã bật.
     service_deduction_budget = 15
+    router_open_ports = {
+        int(item.get("port"))
+        for item in router_ports
+        if item.get("is_open") and str(item.get("port", "")).isdigit()
+    }
     for finding in (dashboard or {}).get("findings", []):
         status = str(finding.get("status", "")).lower()
         risk = str(finding.get("risk", "")).lower()
-        if status not in ("open", "endpoint_reachable", "ssdp_response"):
+        if status not in ("open", "endpoint_reachable", "ssdp_response", "guest_confirmed"):
             continue
         if risk == "critical" and finding.get("check") == "telnet":
             # Telnet trên thiết bị đã được tính ở phần router ports; tránh trừ đôi.
@@ -763,6 +882,38 @@ def evaluate_security_audit(wifi_info: dict, router_ports: list, dns_info: dict,
                 score -= deduction
                 service_deduction_budget -= deduction
                 deductions.append(f"Thiết bị {finding.get('host')} đang mở Telnet (-10đ)")
+        elif finding.get("role") == "gateway" and finding.get("check") == "upnp":
+            # TCP/5000 and TCP/1900 observations on the gateway were already
+            # scored above when the corresponding router port is open.
+            if (
+                (status == "endpoint_reachable" and 5000 in router_open_ports)
+                or (status == "ssdp_response" and 1900 in router_open_ports)
+            ):
+                continue
+            if risk != "medium":
+                continue
+            if service_deduction_budget <= 0:
+                continue
+            deduction = min(3, service_deduction_budget)
+            score -= deduction
+            service_deduction_budget -= deduction
+            recommendations.append(
+                f"Kiểm tra UPnP trên {finding.get('host')}: {finding.get('remediation', 'giới hạn dịch vụ vào mạng tin cậy.')}"
+            )
+        elif finding.get("role") == "gateway" and finding.get("check") == "http_admin":
+            # The router-port audit already accounts for HTTP/HTTPS admin
+            # endpoints, while the dashboard retains their banner evidence.
+            continue
+        elif risk == "high":
+            if service_deduction_budget <= 0:
+                continue
+            deduction = min(8, service_deduction_budget)
+            score -= deduction
+            service_deduction_budget -= deduction
+            deductions.append(f"Dịch vụ rủi ro cao trên {finding.get('host')} cần được khóa (-{deduction}đ)")
+            recommendations.append(
+                f"Khắc phục {finding.get('check')} trên {finding.get('host')}: {finding.get('remediation', 'tắt truy cập khách/ẩn danh và giới hạn theo VLAN.')}"
+            )
         elif risk == "medium":
             if service_deduction_budget <= 0:
                 continue

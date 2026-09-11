@@ -427,6 +427,8 @@ class NetworkScanner:
         # Xác định dải IP cần quét dựa trên Subnet thực tế.  Dùng islice và
         # batch futures để CIDR lớn không bao giờ materialize hàng triệu IP.
         target_ips: List[str] = []
+        target_ip_set = set()
+        explicit_subnet = False
         try:
             max_hosts = max(1, min(int(max_hosts), 65536))
         except (TypeError, ValueError):
@@ -442,20 +444,60 @@ class NetworkScanner:
         except (TypeError, ValueError):
             rate_limit_ms = 0.0
 
+        def append_ip(value: Any) -> None:
+            """Append a valid target once while preserving the configured cap."""
+            if len(target_ips) >= max_hosts:
+                return
+            try:
+                target = str(ipaddress.IPv4Address(str(value).strip()))
+            except (ValueError, TypeError):
+                return
+            if target not in target_ip_set:
+                target_ip_set.add(target)
+                target_ips.append(target)
+
         def append_hosts(network: ipaddress.IPv4Network) -> None:
             remaining = max_hosts - len(target_ips)
-            if remaining > 0:
-                target_ips.extend(str(h) for h in islice(network.hosts(), remaining))
+            if remaining <= 0:
+                return
+            for host in islice(network.hosts(), remaining):
+                append_ip(host)
+
+        def append_adapter_networks(entries: List[Tuple[ipaddress.IPv4Network, List[str]]]) -> None:
+            """Interleave adapter subnets so an early broad subnet cannot starve others."""
+            if not entries:
+                return
+
+            # Probe each adapter's own address/gateway first.  This makes a
+            # quick scan useful even when the total cap is shared by VLANs.
+            for _, preferred in entries:
+                for value in preferred:
+                    append_ip(value)
+
+            active = [iter(network.hosts()) for network, _ in entries]
+            while active and len(target_ips) < max_hosts:
+                remaining = []
+                for host_iter in active:
+                    try:
+                        append_ip(next(host_iter))
+                        remaining.append(host_iter)
+                    except StopIteration:
+                        continue
+                    if len(target_ips) >= max_hosts:
+                        break
+                active = remaining
 
         if base_subnet:
             try:
                 # Trường hợp truyền CIDR như "192.168.1.0/24" hoặc "192.168.0.0/23"
                 if "/" in base_subnet:
                     net = ipaddress.IPv4Network(base_subnet.strip(), strict=False)
+                    explicit_subnet = True
                     append_hosts(net)
                 elif base_subnet.endswith("."):
                     # Trường hợp truyền prefix dạng "192.168.1."
                     target_ips = [f"{base_subnet}{i}" for i in range(1, min(255, max_hosts + 1))]
+                    explicit_subnet = bool(target_ips)
             except Exception:
                 pass
 
@@ -463,9 +505,14 @@ class NetworkScanner:
             configs = list(adapter_configs or [])
             if not configs:
                 configs = list(self.adapters or [])
-            selected = set(self.selected_adapter_indices or [])
+            selected = {str(index) for index in (self.selected_adapter_indices or [])}
             if selected:
-                configs = [c for c in configs if c.get("index") in selected or c.get("interface_index") in selected]
+                configs = [
+                    c for c in configs
+                    if str(c.get("index")) in selected or str(c.get("interface_index")) in selected
+                ]
+            adapter_networks: List[Tuple[ipaddress.IPv4Network, List[str]]] = []
+            network_positions: Dict[str, int] = {}
             for config in configs:
                 for address in config.get("ipv4", []) or []:
                     try:
@@ -474,7 +521,19 @@ class NetworkScanner:
                             ip_value = address.get("IPv4Address") or address.get("IPAddress") or ""
                             prefix = address.get("PrefixLength")
                             if prefix is not None:
-                                append_hosts(ipaddress.IPv4Network(f"{ip_value}/{prefix}", strict=False))
+                                network = ipaddress.IPv4Network(f"{ip_value}/{prefix}", strict=False)
+                                if not explicit_subnet and network.num_addresses > 1024:
+                                    # For a broad adapter prefix, probe the
+                                    # local /24 first so we do not miss peers
+                                    # near the current host.
+                                    network = ipaddress.IPv4Network(f"{ip_value}/24", strict=False)
+                                key = network.with_prefixlen
+                                preferred = [str(ip_value), str(config.get("gateway") or "")]
+                                if key in network_positions:
+                                    adapter_networks[network_positions[key]][1].extend(preferred)
+                                else:
+                                    network_positions[key] = len(adapter_networks)
+                                    adapter_networks.append((network, preferred))
                                 continue
                         else:
                             address_text = str(address)
@@ -482,12 +541,24 @@ class NetworkScanner:
                             ip_value = address_parts[0]
                             prefix = address_parts[1] if len(address_parts) > 1 else None
                         if ip_value:
-                            append_hosts(ipaddress.IPv4Network(f"{ip_value}/{prefix or self.subnet_mask}", strict=False))
+                            network = ipaddress.IPv4Network(f"{ip_value}/{prefix or self.subnet_mask}", strict=False)
+                            if not explicit_subnet and network.num_addresses > 1024:
+                                network = ipaddress.IPv4Network(f"{ip_value}/24", strict=False)
+                            key = network.with_prefixlen
+                            preferred = [str(ip_value), str(config.get("gateway") or "")]
+                            if key in network_positions:
+                                adapter_networks[network_positions[key]][1].extend(preferred)
+                            else:
+                                network_positions[key] = len(adapter_networks)
+                                adapter_networks.append((network, preferred))
                     except (TypeError, ValueError):
                         continue
+            append_adapter_networks(adapter_networks)
             if not target_ips:
                 try:
                     net = ipaddress.IPv4Network(f"{self.local_ip}/{self.subnet_mask}", strict=False)
+                    if net.num_addresses > 1024:
+                        net = ipaddress.IPv4Network(f"{self.local_ip}/24", strict=False)
                     append_hosts(net)
                 except Exception:
                     parts = self.local_ip.split(".")

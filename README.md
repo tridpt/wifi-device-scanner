@@ -22,7 +22,7 @@
    - Cập nhật thời gian thực (Live streaming UI) khi từng thiết bị được tìm thấy.
    - Thanh tìm kiếm và bộ lọc nhanh theo IP, MAC, Tên máy, Hãng sản xuất.
    - Nút copy nhanh IP / MAC và nút vào trang quản trị modem 1 chạm.
-4. **Trình Đổi Danh Tính Card Mạng (MAC Address Randomizer / MAC Spoofing)**:
+4. **Quản lý MAC riêng tư (MAC Privacy Manager)**:
    - Đổi ngẫu nhiên địa chỉ MAC Wi-Fi trên adapter do bạn sở hữu/quản trị (Zero UAC khi Windows cho phép).
    - Hỗ trợ khôi phục cấu hình và hướng dẫn xử lý DHCP/captive portal theo chính sách của quản trị viên.
    - Không dùng để né captive portal, khóa truy cập, thanh toán hoặc cơ chế kiểm soát của mạng khác.
@@ -60,7 +60,7 @@
    - Phát hiện thiết bị mới, biến mất, đổi IP hoặc đổi MAC; thông báo Windows khi có thay đổi.
    - Cho phép đặt tên, phòng, ghi chú và đánh dấu thiết bị tin cậy. Annotation được giữ lại khi thiết bị đổi IP/MAC nếu có thể ghép nối.
 13. **Discovery đa nguồn & độ tin cậy**:
-   - Hỗ trợ IPv6 neighbor cache, mDNS, SSDP/UPnP và reverse-DNS/NetBIOS hostname.
+   - Hỗ trợ IPv6 neighbor cache, mDNS, SSDP/UPnP, reverse-DNS/NetBIOS hostname và DHCP lease hostname khi máy đang quản trị DHCP server; router gia đình thường không công khai lease cho client nên trạng thái này được ghi là best-effort.
    - Chọn nhiều adapter, retry/rate-limit và giới hạn an toàn cho CIDR lớn; hiển thị cảnh báo AP/client isolation hoặc VLAN thay vì khẳng định tuyệt đối.
 14. **Security dashboard có bằng chứng**:
    - Kiểm tra SMB guest (negotiate-only, trạng thái guest vẫn ghi `unverified` nếu chưa xác minh), UPnP, Telnet, HTTP/HTTPS quản trị và DNS.
@@ -91,6 +91,11 @@ hoặc chạy ngầm êm ái bằng `Chay_Scanner.vbs`.
 Mở Terminal / PowerShell và chạy:
 ```powershell
 .\.venv\Scripts\python.exe .\main.py
+```
+
+### Kiểm tra nhanh sau khi sửa mã
+```powershell
+py -m unittest discover -s tests -v
 ```
 
 ---
