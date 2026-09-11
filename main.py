@@ -52,7 +52,7 @@ from wake_on_lan import send_magic_packet, load_saved_wol_devices, save_wol_devi
 from spy_camera_detector import analyze_spy_camera_risk, play_alarm_sound, CAMERA_CHIP_SIGNATURES
 from camera_streamer import CameraStreamWindow
 from camera_auth_checker import CameraAuthWindow
-from mac_randomizer import MacRandomizerWindow
+from mac_randomizer import MacRandomizerWindow, get_mac_profile_settings, apply_mac_profile_settings
 from network_topology import NetworkTopologyView
 from lan_shared_folders import LanSharedFoldersView, open_in_explorer
 from lan_speedtest import LanSpeedtestView
@@ -61,6 +61,7 @@ from network_history import NetworkHistory, device_fingerprint
 from network_discovery import enrich_devices, run_local_discovery, assess_visibility, get_network_adapters
 from report_utils import export_report_html, export_report_pdf
 from notifications import notify_changes
+from config_backup import build_backup_payload, load_backup, save_backup
 
 # Thiết lập phong cách giao diện mặc định
 ctk.set_appearance_mode("Dark")
@@ -1921,6 +1922,7 @@ class WifiScannerApp(ctk.CTk):
         self.scan_adapter_indices: list = []
         self.last_scan_result: dict = {}
         self.last_security_dashboard: dict = {}
+        self._backup_busy = False
         try:
             self.history = NetworkHistory()
         except Exception as exc:
@@ -2337,6 +2339,32 @@ class WifiScannerApp(ctk.CTk):
             font=ctk.CTkFont(size=10),
             text_color=("#6B7280", "#94A3B8"),
         ).grid(row=1, column=4, padx=4, pady=(0, 4), sticky="w")
+
+        backup_actions = ctk.CTkFrame(self.subnet_frame, fg_color="transparent")
+        backup_actions.grid(row=1, column=5, padx=(8, 12), pady=(0, 4), sticky="e")
+        self.btn_backup = ctk.CTkButton(
+            backup_actions,
+            text="💾 Sao lưu",
+            width=88,
+            height=26,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color="#0F766E",
+            hover_color="#115E59",
+            command=self._backup_configuration,
+        )
+        self.btn_backup.pack(side="left", padx=2)
+        self.btn_restore = ctk.CTkButton(
+            backup_actions,
+            text="↩ Khôi phục",
+            width=96,
+            height=26,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color=("#E5E7EB", "#334155"),
+            text_color=("#111827", "#F8FAFC"),
+            hover_color=("#D1D5DB", "#475569"),
+            command=self._restore_configuration,
+        )
+        self.btn_restore.pack(side="left", padx=2)
 
         # 4. Thanh tiến trình quét
         self.progress_bar = ctk.CTkProgressBar(self.tab_scan, height=5)
@@ -3400,6 +3428,234 @@ class WifiScannerApp(ctk.CTk):
     def _show_toast(self, message: str):
         """Hiển thị thông báo ngắn dưới thanh trạng thái."""
         self.lbl_status.configure(text=f"📋 {message}")
+
+    def _collect_backup_settings(self) -> dict:
+        """Collect only portable UI settings; no secrets are written."""
+        theme = "dark"
+        if hasattr(self, "theme_switch") and not self.theme_switch.get():
+            theme = "light"
+        return {
+            "scan_mode": self.scan_mode,
+            "subnet_preset": self.opt_subnet.get(),
+            "cidr": self.entry_cidr.get().strip(),
+            "device_filter": self.filter_combobox.get(),
+            "risk_filter": self.risk_filter_combobox.get(),
+            "room_filter": self.room_filter_combobox.get(),
+            "search_query": self.search_entry.get().strip(),
+            "retry": self.retry_menu.get(),
+            "rate_limit": self.rate_menu.get(),
+            "adapter_indices": list(self.scan_adapter_indices or []),
+            "theme": theme,
+        }
+
+    def _set_backup_busy(self, busy: bool) -> None:
+        self._backup_busy = busy
+        state = "disabled" if busy else "normal"
+        for name in ("btn_backup", "btn_restore"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.configure(state=state)
+
+    def _backup_configuration(self):
+        """Write device data, UI filters, and MAC privacy modes to JSON."""
+        if self._backup_busy:
+            return
+        if self.is_scanning:
+            messagebox.showinfo("Đang quét", "Hãy chờ quét xong trước khi sao lưu cấu hình.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("Backup cấu hình Wi-Fi Device Scanner", "*.json")],
+            initialfile=f"WifiDeviceScanner_Backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            title="Sao lưu cấu hình",
+        )
+        if not filepath:
+            return
+        if not filepath.lower().endswith(".json"):
+            filepath += ".json"
+
+        devices = [dict(device) for device in (self.all_devices or []) if isinstance(device, dict)]
+        settings = self._collect_backup_settings()
+        self._set_backup_busy(True)
+        self.lbl_status.configure(text="💾 Đang chuẩn bị file sao lưu cấu hình...")
+
+        def worker():
+            try:
+                source_devices = devices
+                if not source_devices and self.history is not None:
+                    source_devices = self.history.latest_devices()
+                mac_profiles = get_mac_profile_settings()
+                payload = build_backup_payload(source_devices, settings, mac_profiles)
+                save_backup(filepath, payload)
+                result = {
+                    "ok": True,
+                    "path": filepath,
+                    "device_count": len(payload.get("devices") or []),
+                    "profile_count": len(payload.get("mac_profiles") or []),
+                }
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            self.after(0, lambda r=result: self._finish_backup(result=r))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_backup(self, result: dict):
+        self._set_backup_busy(False)
+        if not result.get("ok"):
+            self.lbl_status.configure(text="❌ Sao lưu thất bại.")
+            messagebox.showerror("Không thể sao lưu", result.get("error", "Lỗi không xác định."))
+            return
+        self.lbl_status.configure(text=f"✅ Đã sao lưu {result.get('device_count', 0)} thiết bị.")
+        messagebox.showinfo(
+            "Sao lưu thành công",
+            f"Đã lưu file cấu hình:\n{result.get('path')}\n\n"
+            f"Thiết bị: {result.get('device_count', 0)}\n"
+            f"Profile MAC: {result.get('profile_count', 0)}\n\n"
+            "File không chứa mật khẩu Wi-Fi.",
+        )
+
+    def _apply_backup_settings(self, settings: dict) -> None:
+        """Apply validated settings to the current controls."""
+        mode = settings.get("scan_mode", "full")
+        mode_labels = {"quick": "⚡ Quét nhanh", "full": "🔎 Quét đầy đủ", "new-only": "🆕 Chỉ thiết bị mới"}
+        self.scan_mode = mode
+        self.scan_mode_menu.set(mode_labels.get(mode, mode_labels["full"]))
+
+        subnet_preset = settings.get("subnet_preset", "Tự động (Theo card mạng)")
+        self.opt_subnet.set(subnet_preset)
+        cidr = str(settings.get("cidr") or "").strip()
+        if not cidr:
+            cidr = self.scanner.network_cidr
+        try:
+            cidr = str(ipaddress.IPv4Network(cidr, strict=False))
+        except (TypeError, ValueError):
+            cidr = self.scanner.network_cidr
+        self.entry_cidr.delete(0, "end")
+        self.entry_cidr.insert(0, cidr)
+        self._update_cidr_info_label(cidr)
+
+        self.filter_combobox.set(settings.get("device_filter", "Tất cả thiết bị"))
+        self.risk_filter_combobox.set(settings.get("risk_filter", "Mọi mức rủi ro"))
+        room = settings.get("room_filter", "Mọi phòng")
+        current_rooms = list(self.room_filter_combobox.cget("values") or [])
+        if room not in current_rooms:
+            current_rooms.append(room)
+            self.room_filter_combobox.configure(values=current_rooms)
+        self.room_filter_combobox.set(room)
+        self.search_entry.delete(0, "end")
+        self.search_entry.insert(0, settings.get("search_query", ""))
+        self.retry_menu.set(settings.get("retry", "Retry 2"))
+        self.rate_menu.set(settings.get("rate_limit", "Rate 2 ms"))
+
+        saved_adapter_indices = list(settings.get("adapter_indices") or [])
+        available_adapter_indices = {
+            str(adapter.get("index", adapter.get("interface_index")))
+            for adapter in (getattr(self.scanner, "adapters", []) or [])
+            if isinstance(adapter, dict)
+        }
+        # Interface indexes are local to a Windows installation. Fall back to
+        # all adapters when a backup is restored on a different machine.
+        self.scan_adapter_indices = [
+            index for index in saved_adapter_indices if str(index) in available_adapter_indices
+        ]
+        self.scanner.set_selected_adapters(self.scan_adapter_indices)
+        if hasattr(self, "btn_adapters"):
+            adapter_count = len(self.scan_adapter_indices)
+            self.btn_adapters.configure(
+                text=f"🧩 Adapter ({adapter_count})" if adapter_count else "🧩 Chọn adapter"
+            )
+        if settings.get("theme") == "light":
+            self.theme_switch.deselect()
+            ctk.set_appearance_mode("Light")
+        else:
+            self.theme_switch.select()
+            ctk.set_appearance_mode("Dark")
+
+    def _restore_configuration(self):
+        """Validate and restore a portable configuration backup."""
+        if self._backup_busy:
+            return
+        if self.is_scanning:
+            messagebox.showinfo("Đang quét", "Hãy chờ quét xong trước khi khôi phục cấu hình.")
+            return
+
+        filepath = filedialog.askopenfilename(
+            filetypes=[("Backup cấu hình Wi-Fi Device Scanner", "*.json"), ("Tất cả tệp", "*.*")],
+            title="Khôi phục cấu hình",
+        )
+        if not filepath:
+            return
+        try:
+            payload = load_backup(filepath)
+        except Exception as exc:
+            messagebox.showerror("File sao lưu không hợp lệ", str(exc))
+            return
+
+        devices = payload.get("devices") or []
+        mac_profiles = payload.get("mac_profiles") or []
+        if not messagebox.askyesno(
+            "Xác nhận khôi phục",
+            f"Khôi phục {len(devices)} thiết bị và {len(mac_profiles)} profile MAC?\n\n"
+            "Bộ lọc giao diện sẽ bị thay thế. Chế độ MAC riêng tư có thể được áp dụng lại "
+            "cho các profile đang tồn tại trên máy này.\n\n"
+            "File không chứa mật khẩu Wi-Fi.",
+        ):
+            return
+
+        self._set_backup_busy(True)
+        self.lbl_status.configure(text="↩ Đang khôi phục cấu hình...")
+        try:
+            if self.history is not None:
+                self.history.restore_devices(devices, restored_at=payload.get("created_at"))
+                self.all_devices = self.history.latest_devices()
+            else:
+                self.all_devices = [dict(device) for device in devices]
+            self._new_only_devices = []
+            self._refresh_room_filter_values()
+            # Apply settings after room values are rebuilt so a saved room
+            # filter is not reset when the restored device list is different.
+            self._apply_backup_settings(payload.get("settings") or {})
+            self._update_stat_counts()
+            self._apply_filter()
+            if hasattr(self, "topology_view"):
+                self.topology_view.update_devices(self.all_devices, auto_layout=True)
+        except Exception as exc:
+            self._set_backup_busy(False)
+            self.lbl_status.configure(text="❌ Khôi phục thất bại.")
+            messagebox.showerror("Không thể khôi phục", str(exc))
+            return
+
+        if not mac_profiles:
+            self._finish_restore([])
+            return
+
+        def worker():
+            try:
+                results = apply_mac_profile_settings(mac_profiles)
+            except Exception as exc:
+                results = [{"ssid": "(hệ thống)", "ok": False, "message": str(exc)}]
+            self.after(0, lambda r=results: self._finish_restore(r))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_restore(self, results: list):
+        self._set_backup_busy(False)
+        failed = [item for item in results if not item.get("ok")]
+        if failed:
+            summary = "\n".join(f"- {item.get('ssid')}: {item.get('message', 'Không áp dụng được')}" for item in failed[:8])
+            self.lbl_status.configure(text="⚠️ Đã khôi phục cấu hình, nhưng một số profile MAC chưa áp dụng được.")
+            messagebox.showwarning(
+                "Khôi phục một phần",
+                f"Đã khôi phục danh sách thiết bị và bộ lọc. Profile MAC lỗi:\n{summary}",
+            )
+            return
+        self.lbl_status.configure(text="✅ Đã khôi phục cấu hình.")
+        messagebox.showinfo(
+            "Khôi phục thành công",
+            f"Đã khôi phục cấu hình và {len(results)} profile MAC.\n\n"
+            "Nếu chế độ MAC thay đổi, hãy kết nối lại Wi-Fi theo chính sách mạng.",
+        )
 
     def _export_data(self):
         """Xuất CSV/JSON hoặc báo cáo HTML/PDF có bằng chứng."""

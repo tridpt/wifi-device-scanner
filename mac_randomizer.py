@@ -14,7 +14,7 @@ import time
 import random
 import subprocess
 import threading
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Iterable, List, Optional, Tuple
 import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
@@ -277,13 +277,84 @@ def get_saved_wifi_profiles() -> List[str]:
         )
         if res.returncode == 0:
             for line in res.stdout.splitlines():
-                if ":" in line and ("All User Profile" in line or "User Profile" in line):
-                    ssid = line.split(":", 1)[1].strip()
-                    if ssid and ssid not in profiles:
+                if ":" not in line:
+                    continue
+                label, ssid = line.split(":", 1)
+                label = label.strip().lower()
+                ssid = ssid.strip()
+                # "show profiles" labels are localized by Windows, while the
+                # actual SSID stays after the colon. Keep the heuristic narrow
+                # enough to exclude interface headings such as "Wi-Fi:".
+                if ssid and ("profile" in label or "hồ sơ" in label):
+                    if ssid not in profiles:
                         profiles.append(ssid)
     except Exception:
         pass
     return profiles
+
+
+def normalize_mac_randomization_mode(value: Any) -> Optional[str]:
+    """Map Windows/localized profile status text to the app's three modes."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if "daily" in text or "hàng ngày" in text or "mỗi ngày" in text:
+        return "daily"
+    if text in {"no", "off", "false"} or "disabled" in text or "disable" in text or "tắt" in text:
+        return "no"
+    if text in {"yes", "on", "true"} or "enabled" in text or "enable" in text or "bật" in text:
+        return "yes"
+    return None
+
+
+def get_mac_profile_settings(profiles: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    """Read privacy modes for saved Wi-Fi profiles without exposing credentials."""
+    profile_names = list(profiles) if profiles is not None else get_saved_wifi_profiles()
+    settings: List[Dict[str, str]] = []
+    for ssid in profile_names:
+        if not ssid:
+            continue
+        try:
+            result = _run_hidden(
+                ["netsh", "wlan", "show", "profile", f"name={ssid}"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+        except Exception:
+            continue
+        if result.returncode != 0:
+            continue
+        mode = None
+        for line in result.stdout.splitlines():
+            if ":" not in line:
+                continue
+            label = line.split(":", 1)[0].strip().lower()
+            if "randomization" not in label and "ngẫu nhiên" not in label:
+                continue
+            mode = normalize_mac_randomization_mode(line.split(":", 1)[1])
+            if mode:
+                break
+        if mode:
+            settings.append({"ssid": ssid, "mode": mode})
+    return settings
+
+
+def apply_mac_profile_settings(settings: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Apply only validated privacy modes; never imports Wi-Fi passwords."""
+    results: List[Dict[str, Any]] = []
+    for item in settings or []:
+        if not isinstance(item, dict):
+            continue
+        ssid = str(item.get("ssid") or "").strip()
+        mode = normalize_mac_randomization_mode(item.get("mode"))
+        if not ssid or mode is None:
+            continue
+        ok, message = set_mac_randomization_for_profile(ssid, mode=mode)
+        results.append({"ssid": ssid, "mode": mode, "ok": ok, "message": message})
+    return results
 
 
 def set_mac_randomization_for_profile(ssid: str, mode: str = "yes") -> Tuple[bool, str]:

@@ -673,6 +673,70 @@ class NetworkHistory:
             "events": related_events[:limit],
         }
 
+    def restore_devices(
+        self,
+        devices: Iterable[Dict[str, Any]],
+        *,
+        restored_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Persist a backup device list as a baseline snapshot without alerts."""
+        unique_devices: List[Dict[str, Any]] = []
+        seen_fingerprints = set()
+        for raw in devices or []:
+            if not isinstance(raw, dict):
+                continue
+            device = dict(raw)
+            fingerprint = device_fingerprint(device)
+            if fingerprint == "unknown:device":
+                fingerprint = _clean(device.get("fingerprint"))
+            if not fingerprint or fingerprint in seen_fingerprints:
+                continue
+            seen_fingerprints.add(fingerprint)
+            device["fingerprint"] = fingerprint
+            unique_devices.append(device)
+
+        stamp = _clean(restored_at) or _utc_now()
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO scans(started_at, completed_at, mode, cidr, adapters_json, visibility_json, device_count) "
+                "VALUES (?, ?, 'restore', '', '[]', ?, ?)",
+                (stamp, stamp, json.dumps({"status": "restored_from_backup"}), len(unique_devices)),
+            )
+            scan_id = int(cursor.lastrowid)
+            for device in unique_devices:
+                fingerprint = device["fingerprint"]
+                self._upsert_metadata_conn(
+                    conn,
+                    fingerprint,
+                    alias=_clean(device.get("alias")),
+                    notes=_clean(device.get("notes")),
+                    room=_clean(device.get("room")),
+                    trusted=bool(device.get("trusted")),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO snapshots(
+                        scan_id, fingerprint, ip, ipv6, mac, name, vendor, category,
+                        rtt_ms, confidence, hostname_source, device_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id,
+                        fingerprint,
+                        _clean(device.get("ip")),
+                        _clean(device.get("ipv6")),
+                        _normalise_mac(device.get("mac")),
+                        _clean(device.get("name")),
+                        _clean(device.get("vendor")),
+                        _clean(device.get("category")) or "unknown",
+                        device.get("rtt_ms"),
+                        device.get("confidence"),
+                        _clean(device.get("hostname_source")),
+                        json.dumps(device, ensure_ascii=False),
+                    ),
+                )
+        return {"scan_id": scan_id, "device_count": len(unique_devices), "restored_at": stamp}
+
     def list_scans(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         with self._lock, self._connection() as conn:

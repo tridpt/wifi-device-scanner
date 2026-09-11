@@ -10,6 +10,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from config_backup import build_backup_payload, load_backup, save_backup, validate_backup_payload
 import mac_randomizer
 from network_discovery import _build_dns_query, _read_dns_name, assess_visibility
 from network_history import NetworkHistory
@@ -113,6 +114,66 @@ class HistoryTests(unittest.TestCase):
                 {"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"},
             )
             self.assertEqual(detail["events"][0]["event_type"], "mac_changed")
+
+    def test_restore_devices_creates_a_baseline_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            history = NetworkHistory(os.path.join(folder, "history.db"))
+            result = history.restore_devices(
+                [
+                    {
+                        "ip": "192.168.1.20",
+                        "mac": "AA:BB:CC:DD:EE:20",
+                        "name": "tablet",
+                        "alias": "Tablet",
+                        "room": "Bedroom",
+                        "trusted": True,
+                    }
+                ],
+                restored_at="2026-09-11T10:00:00+00:00",
+            )
+            self.assertEqual(result["device_count"], 1)
+            devices = history.latest_devices()
+            self.assertEqual(devices[0]["alias"], "Tablet")
+            self.assertEqual(devices[0]["room"], "Bedroom")
+            self.assertTrue(devices[0]["trusted"])
+
+    def test_restore_empty_list_replaces_latest_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            history = NetworkHistory(os.path.join(folder, "history.db"))
+            history.record_scan([{"ip": "192.168.1.2", "mac": "AA:BB:CC:DD:EE:02"}])
+            result = history.restore_devices([], restored_at="2026-09-11T10:00:00+00:00")
+            self.assertIsNotNone(result["scan_id"])
+            self.assertEqual(history.latest_devices(), [])
+
+
+class BackupTests(unittest.TestCase):
+    def test_backup_round_trip_and_safe_defaults(self) -> None:
+        payload = build_backup_payload(
+            [{
+                "ip": "192.168.1.2",
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "alias": "TV",
+                "password": "must-not-be-copied",
+            }],
+            {"scan_mode": "not-valid", "search_query": "TV"},
+            [{"ssid": "Home", "mode": "daily", "password": "must-not-be-copied"}],
+            created_at="2026-09-11T10:00:00+00:00",
+        )
+        self.assertEqual(payload["settings"]["scan_mode"], "full")
+        self.assertEqual(payload["settings"]["search_query"], "TV")
+        self.assertEqual(payload["mac_profiles"], [{"ssid": "Home", "mode": "daily"}])
+        self.assertNotIn("password", payload["devices"][0])
+        self.assertNotIn("password", payload["mac_profiles"][0])
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "config.json")
+            save_backup(path, payload)
+            loaded = load_backup(path)
+            self.assertEqual(loaded, payload)
+
+    def test_invalid_backup_format_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_backup_payload({"format": "other", "version": 1})
 
 
 class SecurityTests(unittest.TestCase):
@@ -228,6 +289,39 @@ class MacRandomizerProcessTests(unittest.TestCase):
 
         startfile.assert_called_once_with("ms-settings:network-wifi")
         popen.assert_not_called()
+
+    def test_mac_profile_settings_keep_only_privacy_mode(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout="    MAC Randomization : Daily\n", stderr="")
+        with patch("mac_randomizer._run_hidden", return_value=completed) as run:
+            settings = mac_randomizer.get_mac_profile_settings(["Home Wi-Fi"])
+
+        self.assertEqual(settings, [{"ssid": "Home Wi-Fi", "mode": "daily"}])
+        self.assertEqual(run.call_count, 1)
+
+    def test_mac_profile_backup_modes_apply_as_netsh_values(self) -> None:
+        with patch("mac_randomizer.set_mac_randomization_for_profile", return_value=(True, "ok")) as set_mode:
+            results = mac_randomizer.apply_mac_profile_settings([
+                {"ssid": "Home", "mode": "yes"},
+                {"ssid": "Office", "mode": "daily"},
+                {"ssid": "Guest", "mode": "no"},
+            ])
+
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(
+            [call.kwargs["mode"] for call in set_mode.call_args_list],
+            ["yes", "daily", "no"],
+        )
+
+    def test_saved_profiles_supports_vietnamese_netsh_labels(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="    Tất cả hồ sơ người dùng : Wi-Fi Nhà\n",
+            stderr="",
+        )
+        with patch("mac_randomizer._run_hidden", return_value=completed):
+            profiles = mac_randomizer.get_saved_wifi_profiles()
+
+        self.assertEqual(profiles, ["Wi-Fi Nhà"])
 
 
 if __name__ == "__main__":

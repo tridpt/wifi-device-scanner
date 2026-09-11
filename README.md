@@ -60,6 +60,7 @@
    - Phát hiện thiết bị mới, biến mất, đổi IP hoặc đổi MAC; thông báo Windows khi có thay đổi.
    - Cho phép đặt tên, phòng, ghi chú và đánh dấu thiết bị tin cậy. Annotation được giữ lại khi thiết bị đổi IP/MAC nếu có thể ghép nối.
    - Nút **Chi tiết** mở hồ sơ từng thiết bị, hiển thị lần thấy cuối, timeline quan sát và lịch sử IP/MAC.
+   - **Sao lưu/khôi phục cấu hình** bằng JSON: danh sách thiết bị, bộ lọc quét và chế độ MAC riêng tư; không lưu mật khẩu Wi-Fi.
 13. **Discovery đa nguồn & độ tin cậy**:
    - Hỗ trợ IPv6 neighbor cache, mDNS, SSDP/UPnP, reverse-DNS/NetBIOS hostname và DHCP lease hostname khi máy đang quản trị DHCP server; router gia đình thường không công khai lease cho client nên trạng thái này được ghi là best-effort.
    - Chọn nhiều adapter, retry/rate-limit và giới hạn an toàn cho CIDR lớn; hiển thị cảnh báo AP/client isolation hoặc VLAN thay vì khẳng định tuyệt đối.
@@ -99,6 +100,12 @@ Mở Terminal / PowerShell và chạy:
 py -m unittest discover -s tests -v
 ```
 
+### Sao lưu và khôi phục cấu hình
+Sau khi quét ít nhất một lần, dùng hai nút **💾 Sao lưu** và **↩ Khôi phục**
+ở thanh dải mạng quét. File JSON gồm danh sách thiết bị (kèm tên/phòng/trạng
+thái tin cậy), bộ lọc giao diện và chế độ MAC riêng tư của các profile Wi-Fi.
+Mật khẩu Wi-Fi, khóa và credential không được ghi vào file.
+
 ---
 
 ## 📁 Cấu trúc mã nguồn
@@ -123,6 +130,7 @@ WifiDeviceScanner/
 ├── oui_db.py                # Cơ sở dữ liệu nhận diện hãng sản xuất OUI & MAC bảo mật
 ├── export_utils.py          # Tiện ích xuất dữ liệu ra file CSV và JSON
 ├── network_history.py       # SQLite snapshot, annotation và cảnh báo thay đổi
+├── config_backup.py         # Sao lưu/khôi phục cấu hình JSON an toàn
 ├── network_discovery.py     # IPv6 neighbor, mDNS, SSDP/UPnP và confidence score
 ├── report_utils.py          # Báo cáo HTML/PDF tự chứa, có bằng chứng/khắc phục
 ├── notifications.py         # Windows toast notification (fallback an toàn)
