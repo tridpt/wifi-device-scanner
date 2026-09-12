@@ -6,6 +6,8 @@ import os
 import struct
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +19,55 @@ from network_history import NetworkHistory
 from scanner import NetworkScanner
 from security_audit import check_smb_guest, evaluate_security_audit, run_security_dashboard
 from spy_camera_detector import analyze_spy_camera_risk
+
+if os.name == "nt":
+    from ping_monitor import (
+        LOAD_TEST_DEFAULT_DURATION_S,
+        LOAD_TEST_DEFAULT_RATE_PPS,
+        LOAD_TEST_MAX_DURATION_S,
+        LOAD_TEST_MAX_RATE_PPS,
+        LoadTestSession,
+        PingSession,
+        PING_DEFAULT_IN_FLIGHT,
+        PING_MAX_COUNT,
+        PING_MAX_DURATION_S,
+        PING_MAX_IN_FLIGHT,
+        PING_MAX_INTERVAL_S,
+        PING_MAX_TIMEOUT_MS,
+        PING_MIN_INTERVAL_S,
+        PING_MIN_TIMEOUT_MS,
+        UDP_PAYLOAD_DEFAULT_BYTES,
+        UDP_PAYLOAD_MAX_BYTES,
+        UDP_PAYLOAD_MIN_BYTES,
+        _build_udp_dns_query,
+        smart_ping,
+        udp_ping,
+        validate_load_test_config,
+        validate_ping_session_config,
+    )
+else:  # Keep the non-Windows test collection path importable.
+    LOAD_TEST_DEFAULT_DURATION_S = None
+    LOAD_TEST_DEFAULT_RATE_PPS = None
+    LOAD_TEST_MAX_DURATION_S = None
+    LOAD_TEST_MAX_RATE_PPS = None
+    LoadTestSession = None
+    PingSession = None
+    PING_DEFAULT_IN_FLIGHT = None
+    PING_MAX_COUNT = None
+    PING_MAX_DURATION_S = None
+    PING_MAX_IN_FLIGHT = None
+    PING_MAX_INTERVAL_S = None
+    PING_MAX_TIMEOUT_MS = None
+    PING_MIN_INTERVAL_S = None
+    PING_MIN_TIMEOUT_MS = None
+    UDP_PAYLOAD_DEFAULT_BYTES = None
+    UDP_PAYLOAD_MAX_BYTES = None
+    UDP_PAYLOAD_MIN_BYTES = None
+    _build_udp_dns_query = None
+    smart_ping = None
+    udp_ping = None
+    validate_load_test_config = None
+    validate_ping_session_config = None
 
 
 def _scanner_for_test() -> NetworkScanner:
@@ -266,6 +317,326 @@ class CameraTests(unittest.TestCase):
         ):
             result = analyze_spy_camera_risk({"ip": "192.168.1.50", "mac": "AA:BB:CC:DD:EE:FF"})
         self.assertEqual(result["risk_level"], "suspicious")
+
+
+@unittest.skipUnless(os.name == "nt", "Windows-only ping engine")
+class PingSessionTests(unittest.TestCase):
+    def test_safe_session_limits_are_restored(self) -> None:
+        self.assertEqual(PING_MAX_COUNT, 10000)
+        self.assertEqual(PING_MAX_DURATION_S, 24 * 60 * 60)
+        self.assertEqual(PING_MIN_INTERVAL_S, 0.05)
+        self.assertEqual(PING_MAX_INTERVAL_S, 3600.0)
+        self.assertEqual(PING_MIN_TIMEOUT_MS, 100)
+        self.assertEqual(PING_MAX_TIMEOUT_MS, 10000)
+        self.assertEqual(PING_DEFAULT_IN_FLIGHT, 4)
+        self.assertEqual(PING_MAX_IN_FLIGHT, 32)
+
+    def test_load_config_is_private_and_bounded(self) -> None:
+        config = validate_load_test_config(
+            "192.168.1.1",
+            10,
+            2,
+            800,
+            protocol="udp",
+            udp_payload_size=256,
+            max_in_flight=4,
+        )
+        self.assertEqual(config["planned_count"], 20)
+        self.assertEqual(config["udp_payload_size"], 256)
+        self.assertEqual(LOAD_TEST_DEFAULT_RATE_PPS, 10.0)
+        self.assertEqual(LOAD_TEST_DEFAULT_DURATION_S, 60.0)
+        with self.assertRaises(ValueError):
+            validate_load_test_config("8.8.8.8", 10, 2, 800)
+        with self.assertRaises(ValueError):
+            validate_load_test_config("192.0.2.1", 10, 2, 800)
+        with self.assertRaises(ValueError):
+            validate_load_test_config("192.168.1.255", 10, 2, 800)
+        with self.assertRaises(ValueError):
+            validate_load_test_config(
+                "192.168.1.1", LOAD_TEST_MAX_RATE_PPS + 1, 2, 800
+            )
+        with self.assertRaises(ValueError):
+            validate_load_test_config(
+                "192.168.1.1", 10, LOAD_TEST_MAX_DURATION_S + 1, 800
+            )
+        with self.assertRaises(ValueError):
+            validate_load_test_config("192.168.1.1", 10, 2, 800, protocol="auto")
+
+    def test_load_session_sends_bounded_udp_probes(self) -> None:
+        summaries = []
+        results = []
+        with patch("ping_monitor.udp_ping", return_value=1) as udp_probe:
+            session = LoadTestSession(
+                "192.168.1.1",
+                rate_pps=5,
+                duration_s=1,
+                timeout_ms=800,
+                protocol="udp",
+                udp_payload_size=256,
+                max_in_flight=2,
+                on_result=results.append,
+                on_complete=summaries.append,
+            )
+            self.assertTrue(session.start())
+            session.wait(3)
+
+        self.assertFalse(session.is_running)
+        self.assertEqual(session.sent_count, 5)
+        self.assertEqual(len(results), 5)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["stop_reason"], "duration")
+        self.assertGreaterEqual(summaries[0]["elapsed_s"], 0.9)
+        self.assertEqual(udp_probe.call_count, 5)
+        self.assertTrue(all(call.kwargs["payload_size"] == 256 for call in udp_probe.call_args_list))
+
+    def test_config_normalizes_zero_duration(self) -> None:
+        config = validate_ping_session_config(
+            "192.168.1.1", 3, 0, 0.05, 800
+        )
+        self.assertIsNone(config["duration_s"])
+        self.assertEqual(config["count"], 3)
+
+    def test_config_rejects_non_finite_timing_values(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_ping_session_config("192.168.1.1", 3, float("nan"), 1, 800)
+        with self.assertRaises(ValueError):
+            validate_ping_session_config("192.168.1.1", 3, 30, float("nan"), 800)
+
+    def test_config_accepts_async_mode_and_bounded_concurrency(self) -> None:
+        config = validate_ping_session_config(
+            "192.168.1.1",
+            3,
+            5,
+            0.05,
+            800,
+            mode="async",
+            max_in_flight=3,
+        )
+        self.assertEqual(config["mode"], "async")
+        self.assertEqual(config["max_in_flight"], 3)
+        udp_config = validate_ping_session_config(
+            "192.168.1.1", 3, 5, 0.05, 800, protocol="udp"
+        )
+        self.assertEqual(udp_config["protocol"], "udp")
+        sized_config = validate_ping_session_config(
+            "192.168.1.1", 3, 5, 0.05, 800, protocol="udp", udp_payload_size=256
+        )
+        self.assertEqual(sized_config["udp_payload_size"], 256)
+        with self.assertRaises(ValueError):
+            validate_ping_session_config(
+                "192.168.1.1",
+                3,
+                5,
+                0.05,
+                800,
+                protocol="udp",
+                udp_payload_size=UDP_PAYLOAD_MIN_BYTES - 1,
+            )
+        with self.assertRaises(ValueError):
+            validate_ping_session_config(
+                "192.168.1.1",
+                3,
+                5,
+                0.05,
+                800,
+                protocol="udp",
+                udp_payload_size=UDP_PAYLOAD_MAX_BYTES + 1,
+            )
+        with self.assertRaises(ValueError):
+            validate_ping_session_config(
+                "192.168.1.1", 3, 5, 0.05, 800, mode="unknown"
+            )
+        with self.assertRaises(ValueError):
+            validate_ping_session_config(
+                "192.168.1.1", 3, 5, 0.05, 800, mode="async", max_in_flight=33
+            )
+        with self.assertRaises(ValueError):
+            validate_ping_session_config(
+                "192.168.1.1", 3, 5, 0.05, 800, protocol="sctp"
+            )
+
+    def test_udp_ping_requires_a_matching_dns_response(self) -> None:
+        class FakeSocket:
+            def __init__(self):
+                self.sent = b""
+                self.address = None
+                self.timeout = None
+                self.closed = False
+
+            def settimeout(self, value):
+                self.timeout = value
+
+            def connect(self, address):
+                self.address = address
+
+            def send(self, payload):
+                self.sent = payload
+                return len(payload)
+
+            def recv(self, _size):
+                return self.sent[:2] + b"\x81\x80" + b"\x00" * 8
+
+            def close(self):
+                self.closed = True
+
+        fake_socket = FakeSocket()
+        with patch("ping_monitor.socket.socket", return_value=fake_socket):
+            latency = udp_ping("192.168.1.1", port=53, timeout_ms=800)
+
+        self.assertIsNotNone(latency)
+        self.assertEqual(fake_socket.address, ("192.168.1.1", 53))
+        self.assertEqual(fake_socket.timeout, 0.8)
+        self.assertTrue(fake_socket.closed)
+
+    def test_udp_query_matches_requested_size(self) -> None:
+        for payload_size in (UDP_PAYLOAD_MIN_BYTES, 44, UDP_PAYLOAD_DEFAULT_BYTES, UDP_PAYLOAD_MAX_BYTES):
+            packet = _build_udp_dns_query(b"\x12\x34", payload_size)
+            self.assertEqual(len(packet), payload_size)
+            self.assertEqual(packet[:2], b"\x12\x34")
+        padded_packet = _build_udp_dns_query(b"\x12\x34", UDP_PAYLOAD_DEFAULT_BYTES)
+        self.assertIn(b"\x00\x0c", padded_packet)
+
+    def test_smart_ping_passes_custom_udp_payload(self) -> None:
+        with (
+            patch("ping_monitor.native_ping", return_value=None),
+            patch("ping_monitor.tcp_ping", return_value=None),
+            patch("ping_monitor.udp_ping", return_value=4) as udp_probe,
+        ):
+            result = smart_ping(
+                "192.168.1.1",
+                timeout_ms=800,
+                protocol="udp",
+                udp_payload_size=256,
+            )
+
+        self.assertEqual(result, (4, "UDP:53"))
+        udp_probe.assert_called_once_with(
+            "192.168.1.1", port=53, timeout_ms=500, payload_size=256
+        )
+
+    def test_session_forwards_custom_udp_payload(self) -> None:
+        calls = []
+
+        def fake_ping(*args, **kwargs):
+            calls.append((args, kwargs))
+            return 3, "UDP:53"
+
+        with patch("ping_monitor.smart_ping", side_effect=fake_ping):
+            session = PingSession(
+                "192.168.1.1",
+                count=1,
+                duration_s=5,
+                interval_s=0.05,
+                timeout_ms=800,
+                protocol="udp",
+                udp_payload_size=256,
+            )
+            self.assertTrue(session.start())
+            session.wait(2)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["udp_payload_size"], 256)
+
+    def test_smart_ping_can_fall_back_to_udp(self) -> None:
+        with (
+            patch("ping_monitor.native_ping", return_value=None),
+            patch("ping_monitor.tcp_ping", return_value=None),
+            patch("ping_monitor.udp_ping", return_value=7) as udp_probe,
+        ):
+            result = smart_ping("192.168.1.1", timeout_ms=800)
+
+        self.assertEqual(result, (7, "UDP:53"))
+        udp_probe.assert_called_once_with("192.168.1.1", port=53, timeout_ms=500)
+
+    def test_forced_udp_skips_icmp_and_tcp(self) -> None:
+        with (
+            patch("ping_monitor.native_ping") as icmp_probe,
+            patch("ping_monitor.tcp_ping") as tcp_probe,
+            patch("ping_monitor.udp_ping", return_value=4) as udp_probe,
+        ):
+            result = smart_ping("192.168.1.1", timeout_ms=800, protocol="udp")
+
+        self.assertEqual(result, (4, "UDP:53"))
+        icmp_probe.assert_not_called()
+        tcp_probe.assert_not_called()
+        udp_probe.assert_called_once_with("192.168.1.1", port=53, timeout_ms=500)
+
+    def test_async_mode_sends_while_previous_probe_is_running(self) -> None:
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def fake_ping(_host, timeout_ms=800, protocol="auto"):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.12)
+            with lock:
+                active -= 1
+            return 2, "ICMP"
+
+        summaries = []
+        results = []
+        with patch("ping_monitor.smart_ping", side_effect=fake_ping):
+            session = PingSession(
+                "192.168.1.1",
+                count=5,
+                duration_s=5,
+                interval_s=0.05,
+                timeout_ms=800,
+                mode="async",
+                max_in_flight=3,
+                on_result=results.append,
+                on_complete=summaries.append,
+            )
+            self.assertTrue(session.start())
+            session.wait(3)
+
+        self.assertFalse(session.is_running)
+        self.assertEqual(len(results), 5)
+        self.assertEqual({item["index"] for item in results}, {1, 2, 3, 4, 5})
+        self.assertGreaterEqual(peak, 2)
+        self.assertEqual(summaries[0]["stop_reason"], "count")
+
+    def test_session_completes_requested_count_and_reports_stats(self) -> None:
+        summaries = []
+        results = []
+        with patch("ping_monitor.smart_ping", return_value=(2, "ICMP")):
+            session = PingSession(
+                "192.168.1.1",
+                count=3,
+                duration_s=5,
+                interval_s=0.05,
+                timeout_ms=800,
+                on_result=results.append,
+                on_complete=summaries.append,
+            )
+            self.assertTrue(session.start())
+            session.wait(2)
+
+        self.assertFalse(session.is_running)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["stop_reason"], "count")
+        self.assertEqual(summaries[0]["success_count"], 3)
+        self.assertEqual(summaries[0]["avg_ms"], 2)
+
+    def test_stop_cancels_before_requested_count(self) -> None:
+        with patch("ping_monitor.smart_ping", return_value=(1, "ICMP")):
+            session = PingSession(
+                "192.168.1.1",
+                count=100,
+                duration_s=30,
+                interval_s=0.05,
+                timeout_ms=800,
+            )
+            self.assertTrue(session.start())
+            session.stop()
+            session.wait(2)
+
+        self.assertEqual(session.completed_reason, "cancelled")
+        self.assertLess(len(session.results), 100)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows-only process behavior")

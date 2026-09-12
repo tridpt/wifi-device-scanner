@@ -8,6 +8,9 @@ __pycache__/
 build/
 dist/
 *.exe
+!assets/iperf3/
+!assets/iperf3/iperf3.exe
+!assets/iperf3/cygwin1.dll
 
 # Local app data
 saved_wol_devices.json

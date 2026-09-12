@@ -40,6 +40,9 @@ from port_scanner import (
     PORT_DATABASE,
 )
 from ping_monitor import PingMonitor
+from ping_session_window import PingSessionWindow
+from load_test_window import LoadTestWindow
+from throughput_test_window import ThroughputTestWindow
 from mac_blocker import get_guide_for_router, format_mac_variants
 from security_audit import (
     get_wifi_security_info,
@@ -1768,6 +1771,18 @@ class DeviceRow(ctk.CTkFrame):
         )
         btn_copy.pack(side="left", padx=2)
 
+        btn_ping = ctk.CTkButton(
+            btn_frame,
+            text="📡 Ping",
+            width=76,
+            height=26,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#0891B2",
+            hover_color="#0E7490",
+            command=self._open_ping_session,
+        )
+        btn_ping.pack(side="left", padx=2)
+
         # Nút Soi cổng dịch vụ (Web, Camera RTSP, SMB, RDP)
         btn_scan_ports = ctk.CTkButton(
             btn_frame,
@@ -1866,6 +1881,15 @@ class DeviceRow(ctk.CTkFrame):
     def _open_wol(self):
         """Mở cửa sổ Wake-on-LAN để đánh thức máy tính này."""
         WakeOnLanWindow(self.winfo_toplevel(), target_device=self.device)
+
+    def _open_ping_session(self):
+        """Mở phiên ping đã điền sẵn địa chỉ của thiết bị này."""
+        target = self.device.get("ip") or self.device.get("ipv6", "")
+        app = self.winfo_toplevel()
+        if hasattr(app, "_open_ping_session_window"):
+            app._open_ping_session_window(target=target)
+        else:
+            PingSessionWindow(app, default_target=target or "192.168.1.1")
 
     def _open_block_mac(self):
         """Mở hướng dẫn chặn thiết bị lạ qua MAC Filtering trên Modem."""
@@ -2532,7 +2556,7 @@ class WifiScannerApp(ctk.CTk):
         # 4. Thanh công cụ phía dưới Tab Ping
         p_ctrl = ctk.CTkFrame(self.tab_ping, fg_color="transparent")
         p_ctrl.grid(row=3, column=0, padx=5, pady=(0, 5), sticky="ew")
-        p_ctrl.grid_columnconfigure(2, weight=1)
+        p_ctrl.grid_columnconfigure(5, weight=1)
 
         self.btn_ping_pause = ctk.CTkButton(
             p_ctrl,
@@ -2560,7 +2584,43 @@ class WifiScannerApp(ctk.CTk):
         )
         self.btn_ping_reset.grid(row=0, column=1, padx=(0, 15), sticky="w")
 
-        ctk.CTkLabel(p_ctrl, text="Máy chủ Internet thử nghiệm:", font=ctk.CTkFont(size=12), text_color=("#6B7280", "#94A3B8")).grid(row=0, column=2, padx=(0, 8), sticky="e")
+        self.btn_ping_custom = ctk.CTkButton(
+            p_ctrl,
+            text="🎯 Ping tùy chỉnh",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=145,
+            height=32,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            command=self._open_ping_session_window,
+        )
+        self.btn_ping_custom.grid(row=0, column=2, padx=(0, 15), sticky="w")
+
+        self.btn_load_test = ctk.CTkButton(
+            p_ctrl,
+            text="🔥 Test tải LAN",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=130,
+            height=32,
+            fg_color="#D97706",
+            hover_color="#B45309",
+            command=self._open_load_test_window,
+        )
+        self.btn_load_test.grid(row=0, column=3, padx=(0, 15), sticky="w")
+
+        self.btn_throughput_test = ctk.CTkButton(
+            p_ctrl,
+            text="🚀 Throughput iperf3",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=155,
+            height=32,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            command=self._open_throughput_test_window,
+        )
+        self.btn_throughput_test.grid(row=0, column=4, padx=(0, 15), sticky="w")
+
+        ctk.CTkLabel(p_ctrl, text="Máy chủ Internet thử nghiệm:", font=ctk.CTkFont(size=12), text_color=("#6B7280", "#94A3B8")).grid(row=1, column=0, columnspan=5, padx=(0, 8), pady=(6, 0), sticky="e")
 
         self.opt_ping_target = ctk.CTkOptionMenu(
             p_ctrl,
@@ -2577,7 +2637,7 @@ class WifiScannerApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         )
         self.opt_ping_target.set("Cloudflare DNS (1.1.1.1)")
-        self.opt_ping_target.grid(row=0, column=3, sticky="e")
+        self.opt_ping_target.grid(row=1, column=5, columnspan=2, pady=(6, 0), sticky="e")
 
     def _switch_tab(self, tab_title: str):
         """Chuyển đổi tab và cập nhật màu sắc thanh điều hướng 2 hàng."""
@@ -2813,6 +2873,21 @@ class WifiScannerApp(ctk.CTk):
             self.scanner.stop_scan()
         except Exception:
             pass
+        try:
+            if getattr(self, "_ping_session_window", None) is not None:
+                self._ping_session_window._close()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_load_test_window", None) is not None:
+                self._load_test_window._close()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_throughput_test_window", None) is not None:
+                self._throughput_test_window._close()
+        except Exception:
+            pass
         self.ping_monitor.stop()
         self.destroy()
 
@@ -2914,6 +2989,62 @@ class WifiScannerApp(ctk.CTk):
     def _open_wol_window(self):
         """Mở cửa sổ Wake-on-LAN để đánh thức máy tính từ xa."""
         WakeOnLanWindow(self)
+
+    def _open_ping_session_window(self, target=None):
+        """Mở công cụ ping hữu hạn với thông số tùy chỉnh."""
+        existing = getattr(self, "_ping_session_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    if target and hasattr(existing, "set_target"):
+                        existing.set_target(target)
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+        self._ping_session_window = PingSessionWindow(
+            self,
+            default_target=target or getattr(self.scanner, "gateway_ip", "192.168.1.1"),
+        )
+
+    def _open_load_test_window(self, target=None):
+        """Mở bài test chịu tải có kiểm soát cho một địa chỉ LAN."""
+        existing = getattr(self, "_load_test_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    if target and hasattr(existing, "set_target"):
+                        existing.set_target(target)
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+        self._load_test_window = LoadTestWindow(
+            self,
+            default_target=target or getattr(self.scanner, "gateway_ip", "192.168.1.1"),
+        )
+
+    def _open_throughput_test_window(self, target=None):
+        """Mở bài đo thông lượng thật giữa máy này và một thiết bị LAN."""
+        existing = getattr(self, "_throughput_test_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    if target and hasattr(existing, "set_target"):
+                        existing.set_target(target)
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+        self._throughput_test_window = ThroughputTestWindow(
+            self,
+            default_local_ip=getattr(self.scanner, "local_ip", ""),
+            default_gateway=getattr(self.scanner, "gateway_ip", ""),
+            default_target=target or "",
+        )
 
     def _open_mac_randomizer_window(self):
         """Mở cửa sổ quản lý MAC riêng tư cho adapter do người dùng quản lý."""
