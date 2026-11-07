@@ -57,8 +57,8 @@ class WifiChannelScanner:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             out = subprocess.check_output(
-                "netsh wlan show networks mode=bssid",
-                shell=True,
+                ["netsh", "wlan", "show", "networks", "mode=bssid"],
+                shell=False,
                 text=True,
                 startupinfo=startupinfo,
                 stderr=subprocess.DEVNULL,

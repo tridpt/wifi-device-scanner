@@ -49,8 +49,8 @@ class LanSpeedtestEngine:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             out = subprocess.check_output(
-                "netsh wlan show interfaces",
-                shell=True,
+                ["netsh", "wlan", "show", "interfaces"],
+                shell=False,
                 text=True,
                 startupinfo=startupinfo,
                 stderr=subprocess.DEVNULL,

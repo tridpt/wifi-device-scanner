@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config_backup import build_backup_payload, load_backup, save_backup, validate_backup_payload
 import mac_randomizer

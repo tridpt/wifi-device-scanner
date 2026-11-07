@@ -10,10 +10,6 @@ datas = [
     ('assets', 'assets'),
 ]
 
-# Thêm saved_wol_devices.json nếu có
-if os.path.exists('saved_wol_devices.json'):
-    datas.append(('saved_wol_devices.json', '.'))
-
 ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all('customtkinter')
 datas += ctk_datas
 binaries = ctk_binaries

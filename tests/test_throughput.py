@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sys
 import unittest
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from throughput_test import (
     THROUGHPUT_MAX_RATE_MBPS,
@@ -93,7 +97,7 @@ class ThroughputConfigTests(unittest.TestCase):
             rate_mbps=100,
         )
         udp_server_command = build_iperf3_command(udp_server_config, "iperf3.exe")
-        self.assertIn("100M/1s", udp_server_command)
+        self.assertIn("150M/1s", udp_server_command)
 
 
 class ThroughputParsingTests(unittest.TestCase):

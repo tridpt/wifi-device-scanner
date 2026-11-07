@@ -217,8 +217,8 @@ class SMBShareScanner:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 out = subprocess.check_output(
-                    f"net view \\\\{ip}",
-                    shell=True,
+                    ["net", "view", rf"\\{ip}"],
+                    shell=False,
                     text=True,
                     stderr=subprocess.STDOUT,
                     timeout=1.8,
@@ -284,7 +284,7 @@ def copy_text_to_clipboard(text: str, root_widget=None):
 def open_windows_fsmgmt():
     """Khởi chạy trình quản lý chia sẻ file chuẩn của Windows (fsmgmt.msc)."""
     try:
-        subprocess.Popen("fsmgmt.msc", shell=True)
+        subprocess.Popen(["mmc.exe", "fsmgmt.msc"], shell=False)
     except Exception as e:
         print(f"Lỗi mở fsmgmt.msc: {e}")
 

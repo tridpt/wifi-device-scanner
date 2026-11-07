@@ -14,6 +14,7 @@ import time
 import random
 import subprocess
 import threading
+import xml.sax.saxutils
 from typing import Dict, Any, Iterable, List, Optional, Tuple
 import tkinter as tk
 from tkinter import messagebox
@@ -425,18 +426,23 @@ def force_generate_new_random_mac(ssid: str, reconnect: bool = True) -> Tuple[bo
         with open(xml_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
+        escaped_ssid = xml.sax.saxutils.escape(ssid)
+        if f"<name>{ssid}</name>" in content and escaped_ssid != ssid:
+            content = content.replace(f"<name>{ssid}</name>", f"<name>{escaped_ssid}</name>")
+
         new_seed = random.randint(100000000, 4000000000)
+        escaped_seed = xml.sax.saxutils.escape(str(new_seed))
         v3_block = (
             f"\t<MacRandomization xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v3\">\n"
             f"\t\t<enableRandomization>true</enableRandomization>\n"
-            f"\t\t<randomizationSeed>{new_seed}</randomizationSeed>\n"
+            f"\t\t<randomizationSeed>{escaped_seed}</randomizationSeed>\n"
             f"\t</MacRandomization>"
         )
 
         if "<MacRandomization" in content:
             new_content = re.sub(
                 r"<MacRandomization[\s\S]*?</MacRandomization>",
-                v3_block.strip(),
+                lambda _: v3_block.strip(),
                 content,
             )
         else:
